@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+# mediapipe models, downloaded on first start
+*.task
+*.task.part

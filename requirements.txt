@@ -1,0 +1,7 @@
+mediapipe
+opencv-python
+numpy
+pyobjc-framework-Cocoa
+pyobjc-framework-Quartz
+pyobjc-framework-AVFoundation
+pyobjc-framework-ApplicationServices
