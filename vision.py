@@ -12,6 +12,7 @@ from mediapipe.tasks.python import vision as mp_vision
 from gaze import GazeDetector
 from gestures import GestureEngine
 from head import FaceObs, HeadTracker
+from preview import PREVIEW_FPS, GestureLog, Recorder, actions_live, camera_wanted
 from tracking import HandObs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -148,7 +149,14 @@ class VisionThread(threading.Thread):
         super().__init__(daemon=True, name="vision")
         self.state, self.cfg, self.actions = state, cfg, actions
         self.stop_evt = threading.Event()
-        self.on_evt = threading.Event()
+        self.on_evt = threading.Event()         # gestyq is ON: actions execute
+        self.win_evt = threading.Event()        # the app window is open: camera + detection for the live view
+        self.record_evt = threading.Event()
+        self.recorder = Recorder()
+        self.glog = GestureLog()
+        self.live = False                       # actions currently executing
+        self.last_pub = 0.0
+        self.pub_n = 0
         self.engine = GestureEngine(cfg)
         self.head = HeadTracker(cfg)
         self.gaze = GazeDetector(cfg)
@@ -167,17 +175,36 @@ class VisionThread(threading.Thread):
             self.on_evt.clear()
         self.state.update(enabled=bool(on))
 
+    def set_window_open(self, open_):
+        """Window open = camera wanted even while OFF (preview); actions stay off unless enabled."""
+        if open_:
+            self.win_evt.set()
+        else:
+            self.win_evt.clear()
+            self.record_evt.clear()
+        self.state.update(window_open=bool(open_))
+
+    def set_recording(self, on):
+        if on:
+            self.record_evt.set()
+        else:
+            self.record_evt.clear()
+
     def reload_camera(self):
         self.reopen = True
 
     def stop(self):
         self.stop_evt.set()
         self.on_evt.clear()
+        self.win_evt.clear()
+        self.record_evt.clear()
 
     # -- helpers
     def _emit(self, evs):
         pulsed = False
         for e in evs:
+            if not self.live:
+                continue
             self.actions.execute(e)
             pulsed = pulsed or e.pulse
         if pulsed:
@@ -185,19 +212,50 @@ class VisionThread(threading.Thread):
 
     def _off(self):
         """Release the mouse and the camera device."""
-        self._emit(self.engine.release())
-        self.actions.release_all()
+        self._release()
         self.cam.close()
         self.engine.reset()
         self.head.reset()
         self.gaze.reset()
-        self.state.update(camera="off", caption="paused", hands=0)
+        self.recorder.stop()
+        self.glog.clear()
+        self.state.update(camera="off", caption="paused", hands=0, preview=None, recording=None)
+
+    def _release(self):
+        """Never leave a mouse button held (switching modes, turning off)."""
+        was = self.live
+        self.live = True
+        self._emit(self.engine.release())
+        self.live = was
+        self.actions.release_all()
 
     def _no_camera(self):
-        self._emit(self.engine.release())
-        self.actions.release_all()
+        self._release()
         self.cam.close()
-        self.state.update(camera="no camera", caption="no camera", hands=0)
+        self.state.update(camera="no camera", caption="no camera", hands=0, preview=None)
+
+    def _publish(self, now, frame, aspect, head_lvl):
+        """Window only: mirrored greyscale ~640 px JPEG + debug copies, at PREVIEW_FPS."""
+        if now - self.last_pub < 1.0 / PREVIEW_FPS:
+            return
+        self.last_pub = now
+        g = cv2.flip(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), 1)
+        if g.shape[1] > 640:
+            g = cv2.resize(g, (640, int(round(g.shape[0] * 640 / g.shape[1]))), interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", g, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if not ok:
+            return
+        head = None
+        if head_lvl > 0:
+            ty, tp = self.head.thresholds(head_lvl)
+            head = {"yaw": self.head.d_yaw, "pitch": self.head.d_pitch, "thr_yaw": ty, "thr_pitch": tp,
+                    "calibrated": self.head.calibrated}
+        self.pub_n += 1
+        self.state.update(preview={
+            "n": self.pub_n, "t": now, "jpg": buf.tobytes(), "aspect": aspect,
+            "debug": [dict(d) for d in self.engine.debug], "head": head, "gestures": self.glog.snapshot(),
+            "caption": self.engine.caption(now)},
+            recording={"active": self.recorder.active, "elapsed": self.recorder.elapsed(now)})
 
     def _ts(self, now):
         self.last_ts = max(self.last_ts + 1, int((now - self.t0) * 1000))
@@ -214,16 +272,35 @@ class VisionThread(threading.Thread):
         was_on, fails, frame_i = False, 0, 0
         try:
             while not self.stop_evt.is_set():
-                if not self.on_evt.is_set():
+                if not camera_wanted(self.on_evt.is_set(), self.win_evt.is_set()):
                     if was_on:
+                        self.live = False
                         self._off()
                         was_on = False
-                    self.on_evt.wait(0.1)
+                    self.stop_evt.wait(0.1)
                     continue
                 if not was_on:
                     was_on, fails = True, 0
+                    self.live = False
                     self.engine.reset(); self.head.reset(); self.gaze.reset()
                     self.state.update(camera="starting", caption="starting")
+                live = actions_live(self.on_evt.is_set())
+                if live != self.live:                 # preview <-> on: drop held buttons, start clean
+                    self._release()
+                    self.engine.reset(); self.head.reset(); self.gaze.reset()
+                    self.live = live
+                win = self.win_evt.is_set()
+                if self.record_evt.is_set() != self.recorder.active:
+                    if self.record_evt.is_set():
+                        try:
+                            self.recorder.start(time.monotonic())
+                        except OSError as e:
+                            print("recording failed:", e)
+                            self.record_evt.clear()
+                    else:
+                        self.recorder.stop()
+                if not win and self.recorder.active:
+                    self.recorder.stop()
                 if self.reopen:
                     self.reopen = False
                     self.cam.close()
@@ -250,7 +327,10 @@ class VisionThread(threading.Thread):
                 img = self.det.image(frame)
                 self.engine.aspect = w / h
                 self.engine.screen = self.actions.bounds()[2:]
-                evs = self.engine.update(self.det.hands(img, ts), now)
+                hands = self.det.hands(img, ts)
+                if self.recorder.active:
+                    self.recorder.write(now, w / h, hands)
+                evs = self.engine.update(hands, now)
 
                 head_lvl = int(self.cfg.get("head_level", 0))
                 eye_on = bool(self.cfg.get("eye_corners"))
@@ -270,10 +350,18 @@ class VisionThread(threading.Thread):
                         self.head.reset()
                     self.gaze.reset()
                 frame_i += 1
+                if win:
+                    self.glog.add_events(evs, now)
                 self._emit(evs)
                 self.state.update(camera="ok", caption=self.engine.caption(now), hands=len(self.engine.labels))
+                if win:
+                    self._publish(now, frame, w / h, head_lvl)
+                elif self.state.d.get("preview") is not None:
+                    self.state.update(preview=None, recording=None)
         finally:
+            self.live = True
             self._emit(self.engine.release())
             self.actions.release_all()
+            self.recorder.stop()
             self.cam.close()
             self.det.close()

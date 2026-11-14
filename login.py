@@ -7,8 +7,8 @@ PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LABEL}.plist")
 
 
 def plist_dict(here, app=None):
-    """Opens gestyq.app when running from the bundle (so permissions stay with "gestyq"), else run.sh."""
-    args = ["/usr/bin/open", "-a", app] if app else ["/bin/bash", os.path.join(here, "run.sh")]
+    """Opens gestyq.app (with --background: no window at login) when running from the bundle (so permissions stay with "gestyq"), else run.sh."""
+    args = ["/usr/bin/open", "-a", app, "--args", "--background"] if app else ["/bin/bash", os.path.join(here, "run.sh")]
     return {"Label": LABEL, "ProgramArguments": args, "WorkingDirectory": here, "RunAtLoad": True,
             "KeepAlive": False}
 

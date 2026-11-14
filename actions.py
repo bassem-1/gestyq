@@ -1,7 +1,10 @@
-"""Executes events on macOS with Quartz CGEvents (vision thread). macOS only; no AppKit here.
+"""Executes events on macOS with Quartz CGEvents (vision thread). macOS only.
 
 The REAL pointer is moved: CGWarpMouseCursorPosition + a posted MouseMoved/LeftMouseDragged event,
 then CGAssociateMouseAndMouseCursorPosition(True). Clicks, drags, scroll and keys are CGEvents.
+Every event is resolved to a gesture id (bindings.gesture_of) and runs the action bound to it in
+cfg["bindings"] (bindings.action_for); the action ids are bindings.ACTIONS. Media / volume keys are
+NX system-defined events (built with AppKit.NSEvent, imported lazily, posted as CGEvents).
 """
 import subprocess
 import threading
@@ -9,20 +12,18 @@ import time
 
 import Quartz
 
+import bindings
 from gestures import tile_rect
 
 # virtual key codes
-K_TAB, K_LEFT, K_RIGHT, K_DOWN, K_UP, K_F11 = 48, 123, 124, 125, 126, 103
+K_TAB, K_LEFT, K_RIGHT, K_DOWN, K_UP, K_F11, K_3 = 48, 123, 124, 125, 126, 103, 20
+NX_SOUND_UP, NX_SOUND_DOWN, NX_PLAY = 0, 1, 16     # NX_KEYTYPE_*
 MODS = {"control": Quartz.kCGEventFlagMaskControl, "command": Quartz.kCGEventFlagMaskCommand,
         "option": Quartz.kCGEventFlagMaskAlternate, "shift": Quartz.kCGEventFlagMaskShift}
-BUILTIN = {
-    "mission_control": "key:126:control",
-    "show_desktop": "key:103",
-    "launchpad": "shell:open -a Launchpad",
-    "notification_center": (
-        'script:tell application "System Events" to tell process "ControlCenter" to '
-        'click menu bar item 1 of menu bar 1 whose description is "Clock"'),
-}
+NOTIFICATION_CENTER = (
+    'tell application "System Events" to tell process "ControlCenter" to '
+    'click menu bar item 1 of menu bar 1 whose description is "Clock"')
+DOUBLE_CLICK_WINDOW = 0.6     # s: a double_click right after a click only adds the second click
 
 
 def is_trusted():
@@ -52,6 +53,7 @@ class Actions:
         self.dragging = False
         self.last = None
         self._b, self._bt = None, 0.0
+        self._last_click = -1e9
 
     # -- geometry
     def bounds(self):
@@ -85,8 +87,11 @@ class Actions:
         Quartz.CGAssociateMouseAndMouseCursorPosition(True)
         self.last = pt
 
-    def _button(self, pt, down, right=False, count=1):
-        if right:
+    def _button(self, pt, down, right=False, count=1, middle=False):
+        if middle:
+            typ = Quartz.kCGEventOtherMouseDown if down else Quartz.kCGEventOtherMouseUp
+            btn = Quartz.kCGMouseButtonCenter
+        elif right:
             typ = Quartz.kCGEventRightMouseDown if down else Quartz.kCGEventRightMouseUp
             btn = Quartz.kCGMouseButtonRight
         else:
@@ -96,11 +101,12 @@ class Actions:
         Quartz.CGEventSetIntegerValueField(ev, Quartz.kCGMouseEventClickState, count)
         self._post(ev)
 
-    def click(self, pt, count=1, right=False):
+    def click(self, pt, count=1, right=False, button=None):
         pt = pt or self.location()
         self.move_to(pt)
-        self._button(pt, True, right, count)
-        self._button(pt, False, right, count)
+        mid = button == "middle"
+        self._button(pt, True, right, count, mid)
+        self._button(pt, False, right, count, mid)
 
     def release_all(self):
         """Never leave a mouse button down."""
@@ -120,18 +126,20 @@ class Actions:
         ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitPixel, 1, int(dy))
         self._post(ev)
 
-    def run_action(self, spec):
-        spec = BUILTIN.get(spec, spec)
-        if spec.startswith("key:"):
-            parts = spec.split(":")
-            flags = 0
-            for m in (parts[2].split(",") if len(parts) > 2 else []):
-                flags |= MODS.get(m, 0)
-            self.key(int(parts[1]), flags)
-        elif spec.startswith("shell:"):
-            subprocess.Popen(spec[6:], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif spec.startswith("script:"):
-            _osa(spec[7:])
+    def media_key(self, key):
+        """NX system key (play/pause, volume): key down + up as system-defined events."""
+        from AppKit import NSEvent
+        for flags, state in ((0xa00, 0xa), (0xb00, 0xb)):
+            ev = NSEvent.otherEventWithType_location_modifierFlags_timestamp_windowNumber_context_subtype_data1_data2_(
+                14, (0, 0), flags, 0, 0, 0, 8, (key << 16) | (state << 8), -1)
+            self._post(ev.CGEvent())
+
+    @staticmethod
+    def _run(args):
+        try:
+            subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
 
     # -- tiling (osascript, as v2)
     def tile(self, mode):
@@ -148,7 +156,60 @@ class Actions:
   end try
 end tell''')
 
-    # -- dispatch
+    # -- actions (ids: bindings.ACTIONS)
+    def run(self, action, pos=None, value=None):
+        """Run one bound action. pos = screen px for the click actions (else the cursor)."""
+        c = self.click
+        now = time.monotonic()
+        if action == "none":
+            return
+        if action == "left_click":
+            c(pos); self._last_click = now
+        elif action == "double_click":
+            if now - self._last_click < DOUBLE_CLICK_WINDOW:     # the pinch already clicked once
+                c(pos, 2)
+            else:
+                c(pos, 1); c(pos, 2)
+            self._last_click = -1e9
+        elif action == "right_click":
+            c(pos, 1, right=True)
+        elif action == "middle_click":
+            c(pos, 1, button="middle")
+        elif action == "scroll":
+            self.scroll(value or 0)
+        elif action == "scroll_inverted":
+            self.scroll(-(value or 0))
+        elif action == "next_space":
+            self.key(K_RIGHT, MODS["control"])
+        elif action == "prev_space":
+            self.key(K_LEFT, MODS["control"])
+        elif action == "mission_control":
+            self.key(K_UP, MODS["control"])
+        elif action == "app_windows":
+            self.key(K_DOWN, MODS["control"])
+        elif action == "show_desktop":
+            self.key(K_F11)
+        elif action == "launchpad":
+            self._run(["open", "-a", "Launchpad"])
+        elif action == "notification_center":
+            _osa(NOTIFICATION_CENTER)
+        elif action == "next_app":
+            self.key(K_TAB, MODS["command"])
+        elif action == "prev_app":
+            self.key(K_TAB, MODS["command"] | MODS["shift"])
+        elif action in ("tile_left", "tile_right", "tile_fill", "tile_center"):
+            self.tile(action[5:])
+        elif action == "play_pause":
+            self.media_key(NX_PLAY)
+        elif action == "volume_up":
+            self.media_key(NX_SOUND_UP)
+        elif action == "volume_down":
+            self.media_key(NX_SOUND_DOWN)
+        elif action == "screenshot":
+            self.key(K_3, MODS["command"] | MODS["shift"])        # full screen, the system's own save location
+        elif action == "display_sleep":
+            self._run(["pmset", "displaysleepnow"])
+
     def execute(self, ev):
         k, v = ev.kind, ev.value
         try:
@@ -157,38 +218,27 @@ end tell''')
                     self.move_to(self.to_px(*v), self.dragging)
                 elif k == "drag_move":
                     self.move_to(self.to_px(*v), True)
-                elif k == "click":
-                    self.click(self.to_px(v[0], v[1]), v[2])
-                elif k == "right_click":
-                    self.click(self.to_px(*v) if v else None, 1, right=True)
-                elif k == "drag_start":
-                    pt = self.to_px(*v)
-                    self.move_to(pt)
-                    self._button(pt, True)
-                    self.dragging = True
                 elif k == "drag_end":
                     if self.dragging:
                         pt = self.to_px(*v) if v else self.last or self.location()
                         self.move_to(pt, True)
                         self._button(pt, False)
                         self.dragging = False
-                elif k == "scroll":
-                    self.scroll(v)
-                elif k == "space":
-                    self.key(K_RIGHT if v == "right" else K_LEFT, MODS["control"])
-                elif k == "tile":
-                    self.tile(v)
-                elif k == "head":
-                    if v == "next_app":
-                        self.key(K_TAB, MODS["command"])
-                    elif v == "prev_app":
-                        self.key(K_TAB, MODS["command"] | MODS["shift"])
-                    elif v == "sleep":
-                        subprocess.Popen(["pmset", "displaysleepnow"], stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL)
-                elif k == "gaze":
-                    spec = self.cfg["actions"].get(f"gaze:{v}")
-                    if spec:
-                        self.run_action(spec)
+                else:
+                    gid = bindings.gesture_of(ev)
+                    if gid is None:
+                        return
+                    action = bindings.action_for(self.cfg, gid)
+                    if k == "drag_start":
+                        if action == "drag":
+                            pt = self.to_px(*v)
+                            self.move_to(pt)
+                            self._button(pt, True)
+                            self.dragging = True
+                    elif k == "scroll":
+                        self.run(action, value=v)
+                    else:
+                        pos = v.get("pos") if k == "gesture" else None
+                        self.run(action, self.to_px(*pos) if pos else None)
         except Exception as e:      # never kill the vision thread
             print("action error:", k, v, e)

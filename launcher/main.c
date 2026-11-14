@@ -1,24 +1,19 @@
-/* gestyq.app launcher. Spawns `python app.py` as a child (not exec) so this signed bundle stays the
-   "responsible process": macOS then lists Accessibility and Camera access under "gestyq" instead of
-   python or the terminal. Paths come from Contents/Resources so rebuilding the code isn't needed
-   (a rebuilt binary has a new signature and would lose the Accessibility grant). */
-#include <errno.h>
+/* gestyq.app launcher. Embeds Python: this signed binary IS the app's process, so the dock icon, the
+   bundle identity (NSBundle.mainBundle), reopen events and the Accessibility / Camera grants all belong
+   to "gestyq" (no python child). libpython is linked at build time (see scripts/bundle.sh); PYTHONHOME
+   and the source folder come from Contents/Resources so rebuilding is only needed when the python env or
+   folder moves (a rebuilt binary has a new signature and loses the Accessibility grant). argv is
+   forwarded to app.py, e.g. --background from the login item. */
 #include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
-#include <signal.h>
-#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
 #include <unistd.h>
 
-extern char **environ;
-static pid_t child = 0;
-
-static void forward(int sig) { if (child > 0) kill(child, sig); }
+extern int Py_BytesMain(int argc, char **argv);
 
 static int read_line(const char *path, char *out, size_t n) {
     FILE *f = fopen(path, "r");
@@ -29,7 +24,7 @@ static int read_line(const char *path, char *out, size_t n) {
     return 0;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
     char exe[PATH_MAX], real[PATH_MAX], tmp[PATH_MAX], contents[PATH_MAX], app[PATH_MAX];
     uint32_t n = sizeof exe;
     if (_NSGetExecutablePath(exe, &n) != 0 || !realpath(exe, real)) return 1;
@@ -38,38 +33,36 @@ int main(void) {
     strlcpy(tmp, contents, sizeof tmp);
     strlcpy(app, dirname(tmp), sizeof app);                          /* .../gestyq.app */
 
-    char dir_file[PATH_MAX], py_file[PATH_MAX], dir[PATH_MAX], py[PATH_MAX], script[PATH_MAX];
+    /* stdout/stderr -> ~/Library/Logs/gestyq.log */
+    const char *home = getenv("HOME");
+    if (home) {
+        char log[PATH_MAX];
+        snprintf(log, sizeof log, "%s/Library/Logs/gestyq.log", home);
+        int fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) { dup2(fd, 1); dup2(fd, 2); if (fd > 2) close(fd); }
+    }
+
+    char dir_file[PATH_MAX], home_file[PATH_MAX], dir[PATH_MAX], pyhome[PATH_MAX], script[PATH_MAX];
     snprintf(dir_file, sizeof dir_file, "%s/Resources/source_dir", contents);
-    snprintf(py_file, sizeof py_file, "%s/Resources/python", contents);
-    if (read_line(dir_file, dir, sizeof dir) || read_line(py_file, py, sizeof py)) {
-        fprintf(stderr, "gestyq: missing Resources/source_dir or Resources/python\n");
+    snprintf(home_file, sizeof home_file, "%s/Resources/python_home", contents);
+    if (read_line(dir_file, dir, sizeof dir) || read_line(home_file, pyhome, sizeof pyhome)) {
+        fprintf(stderr, "gestyq: missing Resources/source_dir or Resources/python_home\n");
         return 1;
     }
     snprintf(script, sizeof script, "%s/app.py", dir);
     if (chdir(dir) != 0) { perror("gestyq: chdir"); return 1; }
     setenv("GESTYQ_APP", app, 1);
     setenv("PYTHONUNBUFFERED", "1", 1);
+    setenv("PYTHONHOME", pyhome, 1);
+    setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
 
-    /* stdout/stderr -> ~/Library/Logs/gestyq.log */
-    posix_spawn_file_actions_t fa;
-    posix_spawn_file_actions_init(&fa);
-    const char *home = getenv("HOME");
-    char log[PATH_MAX];
-    if (home) {
-        snprintf(log, sizeof log, "%s/Library/Logs/gestyq.log", home);
-        posix_spawn_file_actions_addopen(&fa, 1, log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        posix_spawn_file_actions_adddup2(&fa, 1, 2);
-    }
-
-    signal(SIGTERM, forward);
-    signal(SIGINT, forward);
-    signal(SIGHUP, forward);
-    char *argv[] = {py, script, NULL};
-    int err = posix_spawn(&child, py, &fa, NULL, argv, environ);
-    posix_spawn_file_actions_destroy(&fa);
-    if (err) { fprintf(stderr, "gestyq: spawn %s: %s\n", py, strerror(err)); return 1; }
-
-    int st = 0;
-    while (waitpid(child, &st, 0) < 0 && errno == EINTR) {}
-    return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    /* python <script> <forwarded args...>; macOS adds -psn_* when launched from old Finder: drop it */
+    char **av = calloc((size_t)argc + 2, sizeof *av);
+    int ac = 0;
+    av[ac++] = argv[0];
+    av[ac++] = script;
+    for (int i = 1; i < argc; i++)
+        if (strncmp(argv[i], "-psn_", 5) != 0) av[ac++] = argv[i];
+    av[ac] = NULL;
+    return Py_BytesMain(ac, av);
 }

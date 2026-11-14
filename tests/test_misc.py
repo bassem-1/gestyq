@@ -18,7 +18,8 @@ def test_config_defaults_roundtrip_and_shipped_json(tmp_path):
     assert config.load(str(p)) == config.DEFAULTS
     p.write_text(json.dumps({"hand": {"pinch_on": 0.2}, "pointer_speed": 3}))
     c = config.load(str(p))
-    assert c["hand"]["pinch_on"] == 0.2 and c["hand"]["pinch_off"] == 0.40 and c["pointer_speed"] == 3
+    assert c["hand"]["pinch_on"] == 0.2 and c["hand"]["pinch_off"] == config.DEFAULTS["hand"]["pinch_off"]
+    assert c["pointer_speed"] == 3
     assert config.load(str(tmp_path / "missing.json")) == config.DEFAULTS
     with open(os.path.join(ROOT, "config.json")) as f:
         assert json.load(f) == config.DEFAULTS
@@ -26,12 +27,59 @@ def test_config_defaults_roundtrip_and_shipped_json(tmp_path):
 
 def test_spec_defaults():
     h = config.DEFAULTS["hand"]
-    assert (h["pinch_on"], h["pinch_off"], h["pinch_frames"]) == (0.25, 0.40, 2)
+    assert (h["pinch_on"], h["pinch_off"], h["pinch_frames"]) == (0.35, 0.55, 2)
     assert h["loss_grace"] == 0.15 and h["fist_hold"] == 0.15 and h["click_lookback"] == 0.12
-    assert h["ext_deg"] == 160 and h["curl_deg"] == 110 and h["vote_frames"] == 5
+    assert h["ext_deg"] == 155 and h["curl_deg"] == 125 and h["vote_frames"] == 3
     assert h["dwell_time"] == 0.9 and h["dwell_radius"] == 12 and h["dwell_rearm"] == 40
     assert config.DEFAULTS["dwell_click"] is False and config.DEFAULTS["eye_corners"] is False
     assert config.DEFAULTS["swap_hands"] is False and config.DEFAULTS["launch_at_login"] is False
+
+
+def test_bindings_default_and_old_actions_key_dropped():
+    import bindings
+    assert config.DEFAULTS["bindings"] == bindings.DEFAULT_BINDINGS and "actions" not in config.DEFAULTS
+
+
+def test_old_config_migrates_actions_and_drops_old_tuned_defaults(tmp_path):
+    p = tmp_path / "old.json"
+    p.write_text(json.dumps({
+        "pointer_speed": 4, "gadget_origin": [3, 4],
+        "hand": {"pinch_on": 0.25, "ext_deg": 160.0, "pinch_frames": 3, "scroll_gain": 1800},
+        "actions": {"gaze:top-left": "launchpad", "gaze:top-right": "no_such_action", "gaze:bottom-left": "key:1"}}))
+    c = config.load(str(p))
+    assert "actions" not in c and c["pointer_speed"] == 4 and c["gadget_origin"] == [3, 4]
+    assert c["bindings"]["gaze_top_left"] == "launchpad"                       # known id: migrated
+    assert c["bindings"]["gaze_top_right"] == config.DEFAULTS["bindings"]["gaze_top_right"]    # unknown: default
+    assert c["bindings"]["gaze_bottom_left"] == config.DEFAULTS["bindings"]["gaze_bottom_left"]
+    h = c["hand"]
+    assert h["pinch_on"] == config.DEFAULTS["hand"]["pinch_on"] and h["ext_deg"] == config.DEFAULTS["hand"]["ext_deg"]
+    assert h["scroll_gain"] == config.DEFAULTS["hand"]["scroll_gain"] and h["pinch_frames"] == 3
+    # a user's explicit binding wins over the legacy map
+    p.write_text(json.dumps({"actions": {"gaze:top-left": "launchpad"}, "bindings": {"gaze_top_left": "none"}}))
+    assert config.load(str(p))["bindings"]["gaze_top_left"] == "none"
+
+
+def test_user_settings_path_env_override_and_first_load_migration(tmp_path, monkeypatch):
+    user = tmp_path / "support" / "config.json"
+    shipped = tmp_path / "repo.json"
+    monkeypatch.setenv("GESTYQ_CONFIG", str(user))
+    assert config.user_path() == str(user) and config.USER_PATH != str(user)
+    monkeypatch.setattr(config, "PATH", str(shipped))
+    shipped.write_text(json.dumps(config.DEFAULTS))             # untouched shipped defaults: nothing to migrate
+    assert config.load() == config.DEFAULTS and not user.exists()
+    shipped.write_text(json.dumps({"launch_at_login": True, "gadget_origin": [9, 9]}))
+    c = config.load()                                           # customised repo file: copied once
+    assert c["launch_at_login"] is True and user.exists()
+    assert json.load(open(user))["gadget_origin"] == [9, 9]
+    shipped.write_text(json.dumps({"launch_at_login": False}))
+    assert config.load()["launch_at_login"] is True             # the user file now wins
+    c["pointer_speed"] = 4
+    config.save(c)                                              # default path = user file
+    assert json.load(open(user))["pointer_speed"] == 4 and json.load(open(shipped)) == {"launch_at_login": False}
+
+
+def test_tests_are_isolated_from_the_real_settings_file():
+    assert config.user_path() != config.USER_PATH and "gestyq-test-" in config.user_path()
 
 
 def test_debounced_saves_once_after_quiet_period():
@@ -59,7 +107,7 @@ def test_login_plist(tmp_path):
     assert not login.is_enabled(p)
     login.set_enabled(True, "/opt/gestyq", p, app="/Applications/gestyq.app")
     d = plistlib.load(open(p, "rb"))
-    assert d["ProgramArguments"] == ["/usr/bin/open", "-a", "/Applications/gestyq.app"]
+    assert d["ProgramArguments"] == ["/usr/bin/open", "-a", "/Applications/gestyq.app", "--args", "--background"]
 
 
 def test_state_starts_off_and_counts_pulses():
@@ -110,7 +158,7 @@ def test_no_overlay_and_no_pyautogui_anywhere():
 
 
 def test_pure_modules_have_no_platform_imports():
-    pure = ["filters", "tracking", "gestures", "head", "gaze", "events", "config", "state", "login"]
+    pure = ["bindings", "filters", "tracking", "gestures", "head", "gaze", "events", "config", "state", "login"]
     banned = ("cv2", "mediapipe", "AppKit", "Quartz", "Foundation", "objc", "AVFoundation", "ApplicationServices")
     for m in pure:
         tree = ast.parse(open(os.path.join(ROOT, m + ".py")).read())

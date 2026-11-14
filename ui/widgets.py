@@ -276,7 +276,7 @@ class PulseDot(Flipped):
 
 
 class Row(Flipped):
-    """32pt row with a hover wash that extends 8pt past the content. Dims to 32% and goes inert."""
+    """32pt row with a hover wash that extends 8pt past the content. Dims to 55% and goes inert."""
 
     def initWithWidth_(self, w):
         self = objc.super(Row, self).initWithFrame_(NSMakeRect(0, 0, w, T.ROW))
@@ -286,7 +286,7 @@ class Row(Flipped):
 
     def set_inert(self, inert):
         self.inert = inert
-        self.setAlphaValue_(T.A_DIM if inert else 1.0)
+        self.setAlphaValue_(T.A_FG2 if inert else 1.0)   # 55%: reads as off but stays legible
 
     def hitTest_(self, p):
         return None if self.inert else objc.super(Row, self).hitTest_(p)

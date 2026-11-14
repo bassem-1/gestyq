@@ -60,10 +60,39 @@ def palm_width(L):
     return dist3(L[5], L[17])
 
 
+def dist2(a, b):
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def palm_scale(L):
+    """Hand size in frame widths: mean of palm width (5-17) and palm length (0-9), both in the image
+    plane. Two measures so turning the hand sideways OR pointing it at the camera shrinks only one."""
+    return 0.5 * (dist2(L[5], L[17]) + dist2(L[0], L[9]))
+
+
 def pinch_ratio(L):
-    """3D distance thumb tip - index tip, divided by palm width (landmarks 5-17)."""
-    w = palm_width(L)
-    return dist3(L[4], L[8]) / w if w > 1e-6 else 9.0
+    """Thumb tip - index tip distance in the IMAGE PLANE (x, y only) over palm_scale. MediaPipe's z is
+    noisy and scaled differently from x/y; including it inflated the ratio and hid real pinches."""
+    s = palm_scale(L)
+    return dist2(L[4], L[8]) / s if s > 1e-6 else 9.0
+
+
+Z_WEIGHT = 0.5      # z counts half in reach distances (noisy)
+
+
+def _dz(a, b):
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (Z_WEIGHT * (a[2] - b[2])) ** 2)
+
+
+def finger_reach(L):
+    """Per finger: wrist-to-tip distance over wrist-to-MCP distance. ~1.8-1.9 straight, ~1.4 half curled,
+    ~0.8-1.0 curled into the palm. Unlike a joint angle it survives foreshortening (finger pointing
+    at the camera), because tip and MCP shrink together."""
+    out = {}
+    for name, (m, p, t) in FINGERS.items():
+        d = _dz(L[m], L[0])
+        out[name] = _dz(L[t], L[0]) / d if d > 1e-6 else 1.0
+    return out
 
 
 def finger_angles(L):
@@ -96,26 +125,44 @@ def handedness_geometry(lms):
 
 # ------------------------------------------------------------------ finger state
 class FingerStates:
-    """ext / curl per finger with hysteresis (Schmitt trigger on the PIP angle)."""
+    """ext / curl per finger with hysteresis. Two independent cues are combined:
+      angle  - PIP interior angle (180 straight)
+      reach  - wrist-to-tip over wrist-to-MCP (see finger_reach), robust to foreshortening
+    extended evidence: angle > ext_deg, or (angle > soft_deg and reach > reach_ext)
+    curled evidence:   angle < curl_deg, or reach < reach_curl
+    A finger switches only on evidence for the other state; first sight needs extended evidence to
+    read 'ext', so a loose, half-curled finger reads curled (a peace sign stays a peace sign)."""
 
     def __init__(self, h):
         self.ext_deg, self.curl_deg = h["ext_deg"], h["curl_deg"]
+        self.soft_deg = h.get("soft_deg", 135.0)
+        self.reach_ext, self.reach_curl = h.get("reach_ext", 1.6), h.get("reach_curl", 1.3)
         self.state = {}
+        self.reach = {}
 
     def reset(self):
         self.state = {}
+        self.reach = {}
 
-    def _angle(self, name, a, prev):
-        if prev is None:   # first sight: split the difference
-            return "ext" if a > (self.ext_deg + self.curl_deg) / 2 else "curl"
+    def _finger(self, a, r, prev):
+        if r is None:                       # angle-only (no landmarks available)
+            ext_ev, curl_ev = a > self.ext_deg, a < self.curl_deg
+            if prev is None:
+                return "ext" if a > (self.ext_deg + self.curl_deg) / 2 else "curl"
+        else:
+            ext_ev = a > self.ext_deg or (a > self.soft_deg and r > self.reach_ext)
+            curl_ev = a < self.curl_deg or r < self.reach_curl
+            if prev is None:
+                return "ext" if ext_ev and not curl_ev else "curl"
         if prev == "ext":
-            return "curl" if a < self.curl_deg else "ext"
-        return "ext" if a > self.ext_deg else "curl"
+            return "curl" if curl_ev else "ext"
+        return "ext" if ext_ev else "curl"
 
-    def update(self, ang):
+    def update(self, ang, reach=None):
         st = {}
+        self.reach = dict(reach or {})
         for name in FOUR:
-            st[name] = self._angle(name, ang[name], self.state.get(name))
+            st[name] = self._finger(ang[name], (reach or {}).get(name), self.state.get(name))
         ip, ratio = ang["thumb"]
         prev = self.state.get("thumb")
         if prev is None:
@@ -128,40 +175,53 @@ class FingerStates:
         return st
 
 
-def classify_pose(st):
+def classify_pose(st, reach=None, fist_reach=1.25):
+    """open (all four fingers extended) | scroll (index+middle up, ring+pinky folded) | point |
+    fist | other. `reach` (finger_reach) makes 'fist' strict: every fingertip must be close to the
+    palm. A pinch bends the index to meet the thumb and is NOT a fist. Ambiguous poses -> 'other',
+    which does nothing, rather than 'open' (which can swipe / tile)."""
     e = [st[f] == "ext" for f in FOUR]
     if not any(e):
-        return "fist"
+        if reach is None or all(reach[f] < fist_reach for f in FOUR):
+            return "fist"
+        return "other"
     if e[0] and e[1] and not e[2] and not e[3]:
         return "scroll"
     if e[0] and not any(e[1:]):
         return "point"
-    if sum(e) >= 3:
+    if all(e):
         return "open"
     return "other"
 
 
 class PinchDetector:
-    """Hysteresis on the pinch ratio; `confirmed` only after >= min_frames consecutive frames."""
+    """Hysteresis on the pinch ratio (on below pinch_on, off above pinch_off); `confirmed` after
+    pinch_frames good frames. A pinch survives up to pinch_miss consecutive bad frames (landmark
+    noise) before it is dropped, so one jittery frame neither cancels a click nor splits it in two."""
 
     def __init__(self, h):
         self.on, self.off, self.min_frames = h["pinch_on"], h["pinch_off"], h["pinch_frames"]
+        self.max_miss = h.get("pinch_miss", 1)
         self.reset()
 
     def reset(self):
         self.raw = self.confirmed = self.just_confirmed = False
         self.onset = None
         self.frames = 0
+        self.miss = 0
 
     def update(self, ratio, now, allowed=True):
         was = self.confirmed
         if not self.raw:
             if allowed and ratio < self.on:
-                self.raw, self.onset, self.frames = True, now, 1
+                self.raw, self.onset, self.frames, self.miss = True, now, 1, 0
         elif ratio > self.off:
-            self.raw = self.confirmed = False
-            self.onset, self.frames = None, 0
+            self.miss += 1
+            if self.miss > self.max_miss:
+                self.raw = self.confirmed = False
+                self.onset, self.frames, self.miss = None, 0, 0
         else:
+            self.miss = 0
             self.frames += 1
         if self.raw and self.frames >= self.min_frames:
             self.confirmed = True
@@ -169,7 +229,9 @@ class PinchDetector:
 
 
 class HandState:
-    """Per-role feature pipeline: angles -> finger states -> pose -> 5-frame vote, plus pinch."""
+    """Per-role feature pipeline: angles + reach -> finger states -> pose -> vote, plus pinch.
+    Also keeps `open_frames` (consecutive raw 'open' frames) and `scroll_seen` (last time the raw pose
+    was two-finger) so swipe / tiling can demand a confident open palm."""
 
     def __init__(self, h):
         self.h = h
@@ -185,18 +247,33 @@ class HandState:
         self.label, self.label_since = "none", 0.0
         self.pose_raw = "none"
         self.states = {}
+        self.reach = {}
         self.ratio = 9.0
         self.anchor = (0.5, 0.5)
         self.fist_raw = False
+        self.open_frames = 0
+        self.scroll_seen = -1e9
+
+    def confident_open(self, now):
+        """All four fingers extended for open_frames in a row, and no two-finger pose lately."""
+        return (self.label == "open" and self.open_frames >= self.h.get("open_frames", 4)
+                and now - self.scroll_seen > self.h.get("scroll_veto", 0.6))
 
     def update(self, lms, aspect, now):
         L = iso(lms, aspect)
-        self.states = self.fingers.update(finger_angles(L))
-        self.pose_raw = classify_pose(self.states)
-        self.fist_raw = self.pose_raw == "fist"
+        self.reach = finger_reach(L)
+        self.states = self.fingers.update(finger_angles(L), self.reach)
+        self.pose_raw = classify_pose(self.states, self.reach, self.h.get("fist_reach", 1.25))
         self.ratio = pinch_ratio(L)
+        if (self.pose_raw == "fist" and (self.ratio < self.pinch.on or self.pinch.raw)
+                and self.reach["index"] > self.h.get("fist_pinch_reach", 1.05)):
+            self.pose_raw = "other"        # thumb on a bent index that is still held out: a pinch, not a fist
+        self.fist_raw = self.pose_raw == "fist"
         self.pinch.update(self.ratio, now, allowed=not self.fist_raw)
         self.anchor = palm_anchor(lms)
+        self.open_frames = self.open_frames + 1 if self.pose_raw == "open" else 0
+        if self.pose_raw == "scroll":
+            self.scroll_seen = now
         lab = self.vote.push(self.pose_raw)
         if lab != self.label:
             self.label, self.label_since = lab, now

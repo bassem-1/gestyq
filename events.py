@@ -2,8 +2,10 @@
 
 
 class Event:
-    """kind: move click right_click drag_start drag_move drag_end scroll space tile head gaze.
-    value: kind specific (positions are normalised screen coords (nx, ny)).
+    """kind: move drag_start drag_move drag_end scroll gesture head gaze.
+    value: kind specific (positions are normalised screen coords (nx, ny)); "gesture" carries
+    {"id": gesture_id, "pos": (nx, ny) | None}, "scroll" signed px (hand up = positive).
+    See bindings.gesture_of for how an event maps to a gesture id.
     pulse: True when the gadget pulse dot should flash."""
     __slots__ = ("kind", "value", "pulse")
 

@@ -65,3 +65,12 @@ def cfg(**over):
     c = config.load("/nonexistent")
     c.update(over)
     return c
+
+
+def noisy(lms, rng, xy=0.0, z=0.0):
+    """Landmark jitter: gaussian noise on x/y and (usually much larger) on z."""
+    return [(x + rng.gauss(0, xy), y + rng.gauss(0, xy), zz + rng.gauss(0, z)) for x, y, zz in lms]
+
+
+# peace sign as real hands make it: middle a bit bent (~150 deg), ring loose (~120 deg), pinky folded
+PEACE = (0.0, 0.2, 0.45, 0.9)

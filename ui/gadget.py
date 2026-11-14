@@ -174,7 +174,8 @@ class GadgetController:
         m = NSMenu.alloc().init()
         m.setAppearance_(T.dark_appearance())
         cfg = self.model.cfg
-        entries = [("hide gadget", False, lambda: self.model.set("desktop_gadget", False)),
+        entries = [("open gestyq", False, self.model.open_window),
+                   ("hide gadget", False, lambda: self.model.set("desktop_gadget", False)),
                    ("float above windows", cfg["gadget_floats"],
                     lambda: self.model.set("gadget_floats", not cfg["gadget_floats"])),
                    ("quit", False, self.model.quit)]

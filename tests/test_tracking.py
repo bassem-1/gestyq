@@ -3,7 +3,7 @@ import random
 
 import config
 from synth import cfg, make_hand, obs, true_label
-from tracking import (FingerStates, HandState, HandTracker, PinchDetector, angle_at, classify_pose,
+from tracking import (FingerStates, finger_reach, HandState, HandTracker, PinchDetector, angle_at, classify_pose,
                       finger_angles, handedness_geometry, iso, palm_anchor, pinch_ratio)
 
 H = config.DEFAULTS["hand"]
@@ -46,6 +46,7 @@ def test_thumb_states_and_poses():
     assert P((0, 0, 0, 0)) == "open"
     assert P((1, 1, 1, 1)) == "fist"
     assert P((0, 0, 1, 1)) == "scroll"
+    assert P((0, 0, 0, 1)) == "other"          # three fingers up is not an open palm
     assert P((0, 1, 1, 1)) == "point"
 
 
@@ -64,13 +65,16 @@ def test_pinch_hysteresis_and_persistence():
     p = PinchDetector(H)
     p.update(0.2, 0.0)
     assert p.raw and not p.confirmed and p.onset == 0.0     # one frame is not enough
-    p.update(0.35, 0.03)                                    # above on but below off: still raw
+    p.update(0.5, 0.03)                                     # above on but below off: still raw
     assert p.raw and p.confirmed and p.just_confirmed
-    p.update(0.39, 0.06)
+    p.update(0.54, 0.06)
     assert p.confirmed and not p.just_confirmed
-    p.update(0.45, 0.09)
+    p.update(0.7, 0.09)                                     # one noisy frame is tolerated ...
+    assert p.raw and p.confirmed
+    p.update(0.3, 0.12)
+    p.update(0.7, 0.15); p.update(0.7, 0.18)                # ... two in a row release it
     assert not p.raw and not p.confirmed
-    p.update(0.2, 0.12); p.update(0.6, 0.15)                # single blip never confirms
+    p.update(0.2, 0.21); p.update(0.9, 0.24); p.update(0.9, 0.27)   # single blip never confirms
     assert not p.confirmed
 
 
@@ -173,3 +177,46 @@ def test_handstate_vote_smooths_flicker():
         hs.update(make_hand(curl=curl), 1.0, i / 30)
         labels.append(hs.label)
     assert set(labels) == {"open"}
+
+
+def test_fist_needs_tips_at_the_palm_not_just_curled_fingers():
+    P = lambda curl, **kw: classify_pose(*_states(make_hand(curl=curl, **kw)))
+    assert P((1, 1, 1, 1)) == "fist"
+    assert P((0.4, 0.8, 0.8, 0.8), pinch=1.0) == "other"      # pinch with a bent index is not a fist
+    hs = HandState(H)                                          # ... also when the index reads fist-tight
+    hs.update(make_hand(curl=(0.55, 0.8, 0.8, 0.8), pinch=1.0), 1.0, 0.0)
+    assert hs.pose_raw == "other" and hs.pinch.raw
+
+
+def _states(L):
+    L = iso(L)
+    fs = FingerStates(H)
+    st = fs.update(finger_angles(L), finger_reach(L))
+    return st, finger_reach(L)
+
+
+def test_peace_sign_with_loose_ring_and_bent_middle_is_scroll():
+    from synth import PEACE
+    st, r = _states(make_hand(curl=PEACE))
+    assert st["index"] == "ext" and st["middle"] == "ext" and st["ring"] == "curl" and st["pinky"] == "curl"
+    assert classify_pose(st, r) == "scroll"
+
+
+def test_pinch_ratio_ignores_z():
+    L = [(x, y, z + (0.2 if i in (4, 8) else 0)) for i, (x, y, z) in enumerate(make_hand(pinch=1.0))]
+    assert pinch_ratio(iso(L)) < 0.2
+
+
+def test_open_palm_confidence_and_scroll_veto():
+    hs = HandState(H)
+    for i in range(3):
+        hs.update(make_hand(), 1.0, i / 30)
+    assert not hs.confident_open(0.1)                  # not enough frames yet
+    for i in range(3, 8):
+        hs.update(make_hand(), 1.0, i / 30)
+    assert hs.confident_open(8 / 30)
+    hs.update(make_hand(curl=(0, 0, 1, 1)), 1.0, 9 / 30)
+    for i in range(10, 16):
+        hs.update(make_hand(), 1.0, i / 30)
+    assert not hs.confident_open(16 / 30)              # a two-finger frame was seen < 0.6 s ago
+    assert hs.confident_open(1.0)

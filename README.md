@@ -11,10 +11,47 @@ pip install -r requirements.txt
 scripts/bundle.sh            # builds and installs /Applications/gestyq.app, then open it
 ```
 
-the app is a small launcher that runs `app.py` from this folder, so code edits take effect on the next
-launch without rebuilding. rebuild only if you move the folder or change the python env. logs go to
-`~/Library/Logs/gestyq.log`. `./run.sh` still works for quick runs from a terminal, but then macOS
+the app is a small launcher that embeds python (links `libpython3.11.dylib`, sets `PYTHONHOME`) and runs
+`app.py` from this folder inside the bundle's own process, so the dock icon, reopen events and the
+camera/accessibility grants all belong to "gestyq". code edits take effect on the next launch without
+rebuilding; rebuild only if you move the folder or change the python env (a rebuilt binary has a new
+signature, so re-enable gestyq under accessibility once). logs go to `~/Library/Logs/gestyq.log`. `./run.sh` still works for quick runs from a terminal, but then macOS
 attributes permissions to the terminal instead of gestyq.
+
+## the window
+
+opening gestyq shows its window (also: `open gestyq` in the popover, the gadget's right-click menu, or
+launching the app again while it runs). closing it returns to the menu bar; gestyq keeps running. the
+login item starts with `--background`, so no window appears at login.
+
+- left, live view: the mirrored camera, dimmed, with each hand's 21 landmarks (pointer hand full red,
+  command hand 55%), role tag, and under it each hand's pose, finger states (T I M R P, filled =
+  extended), pinch ratio against the `pinch_on` / `pinch_off` ticks, handedness vote, head yaw/pitch
+  against its threshold, and the last 8 recognised gestures with the action they triggered.
+- right, inspector: every gesture grouped by hand with its bound action. a row lights up when that gesture
+  is detected live. select one to read how to do it and pick what it does; changes save immediately.
+  `reset to defaults` restores the shipped bindings.
+- `record` (under the log) writes landmark sessions to
+  `~/Library/Application Support/gestyq/recordings/<YYYYmmdd-HHMMSS>.jsonl`, one line per camera frame:
+  `{"t": monotonic s, "aspect": w/h, "hands": [{"lms": [[x,y,z] x 21], "label": "Right", "conf": 0.97}]}`
+  (unmirrored normalised landmarks; `tools/replay.py` reads them).
+
+### preview mode
+
+while the window is open the camera and detection run even if gestyq is off, so the live view always
+works, but no action executes: the window says `preview · actions off`. turn gestyq on (switch in the
+window, popover or gadget) and the same view runs with actions live. closing the window while off stops
+the camera; switching modes never leaves a mouse button held.
+
+## bindings
+
+what each gesture does is not fixed. `bindings.py` lists every gesture and action; your choices live
+under `bindings` in your settings file. a missing or invalid entry falls back to the default.
+
+## settings
+
+your settings live in `~/Library/Application Support/gestyq/config.json` (the popover and the window write
+it; the repo's `config.json` only holds the defaults).
 
 ## permissions
 
@@ -26,7 +63,7 @@ attributes permissions to the terminal instead of gestyq.
 the app starts off. click the desktop gadget (or the switch in the popover) to turn it on. off releases
 any held mouse button and the camera.
 
-## gestures
+## gestures (default bindings)
 
 | hand | gesture | action |
 |---|---|---|
@@ -45,11 +82,11 @@ eye corners (gaze dwell on a screen corner) is beta and off by default.
 
 ## tuning
 
-run `python debug.py`: mirrored camera with landmarks, each hand's role and vote, finger states, pinch
+the window's live view covers most of this. `python debug.py` is the older OpenCV tool: mirrored camera with landmarks, each hand's role and vote, finger states, pinch
 ratio, gesture label, head yaw/pitch against the baseline and head events. keys: `q` quit, `s` swap
 hands, `r` re-calibrate head. if roles are still reversed, turn on `swap hands`.
 
-keys in `config.json` (the popover writes the rest):
+keys in your settings file (the popover and window write the rest):
 
 - `hand.min_cutoff`, `hand.beta`, `hand.deadzone`: one euro filter on the cursor (smooth when slow, fast when fast)
 - `hand.frame_margin_x/y`: camera area mapped to the screen
@@ -62,4 +99,4 @@ keys in `config.json` (the popover writes the rest):
   `head.pitch_per_deg` convert the nose-offset proxy to degrees
 - `pointer_speed` 0-4, `head_level` 0-4 (0 = off)
 
-tests: `python -m pytest tests` (pure logic only, runs anywhere).
+tests: `python -m pytest tests` (pure logic; the layout test needs AppKit and skips elsewhere).

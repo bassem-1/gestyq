@@ -1,7 +1,14 @@
-"""Gesture engine: tracked hands -> events. Pure Python (no cv2/mediapipe/AppKit/Quartz)."""
+"""Gesture engine: tracked hands -> events. Pure Python (no cv2/mediapipe/AppKit/Quartz).
+
+Events (see bindings.gesture_of): continuous "move", "drag_start"/"drag_move"/"drag_end", "scroll" (px,
+hand up = positive); discrete hand gestures are Event("gesture", {"id": gesture_id, "pos": (nx, ny)|None},
+pulse=True). What a gesture DOES is cfg["bindings"], read here only to decide whether to emit it
+(a gesture bound to "none" emits nothing; fist bound to "drag" drags, to anything else fires once per hold).
+"""
 import math
 from collections import deque
 
+import bindings
 from config import POINTER_SCALE
 from events import Event
 from filters import DeadZone, OneEuro, OneEuro2D, RingBuffer, clamp
@@ -43,7 +50,7 @@ def caption_for(hands, flash=None):
 
 
 class PointerHand:
-    """Right hand: palm-anchored cursor, pinch click, fist drag, optional dwell click."""
+    """Right hand: palm-anchored cursor, pinch / double pinch, fist (drag by default), optional dwell."""
 
     def __init__(self, cfg):
         self.cfg, self.h = cfg, cfg["hand"]
@@ -54,7 +61,7 @@ class PointerHand:
 
     def reset(self):
         self.filt.reset(); self.dead.reset(); self.buf.clear()
-        self.mode = "move"            # move | pinch_wait | pinch | fist_wait | drag
+        self.mode = "move"            # move | pinch_wait | pinch | fist_wait | fist_done | drag
         self.cur = None               # last cursor position (normalised)
         self.sent = None
         self.t_onset = 0.0
@@ -94,11 +101,12 @@ class PointerHand:
         pos = (dx / REF, dy / REF)
         self.buf.push(now, pos)
         pn, label = hs.pinch, hs.label
+        act = lambda g: bindings.action_for(self.cfg, g)
         m = self.mode
         if m == "move":
-            if pn.raw and not hs.fist_raw:
+            if pn.raw:                          # a pinch always wins over a fist and never starts a drag
                 self.mode, self.t_onset = "pinch_wait", pn.onset
-            elif label == "fist":
+            elif label == "fist" and act("fist") != "none":
                 self.mode, self.t_onset = "fist_wait", hs.label_since
             else:
                 self.cur = pos
@@ -114,9 +122,11 @@ class PointerHand:
                 at = self.buf.at(self.t_onset - h["click_lookback"]) or self.cur or pos
                 self.cur = at
                 self._move(at, ev)
-                count = 2 if now - self.last_click < h["double_click_gap"] else 1
-                self.last_click = -1e9 if count == 2 else now
-                ev.append(Event("click", (at[0], at[1], count), pulse=True))
+                dbl = now - self.last_click < h["double_click_gap"] and act("double_pinch") != "none"
+                self.last_click = -1e9 if dbl else now
+                gid = "double_pinch" if dbl else "pinch"
+                if act(gid) != "none":
+                    ev.append(Event("gesture", {"id": gid, "pos": (at[0], at[1])}, pulse=True))
                 self.mode = "pinch"
         elif m == "pinch":
             if not pn.raw:
@@ -128,8 +138,15 @@ class PointerHand:
                 at = self.buf.at(self.t_onset - h["click_lookback"]) or self.cur or pos
                 self.cur = at
                 self._move(at, ev)
-                ev.append(Event("drag_start", at, pulse=True))
-                self.mode = "drag"
+                if act("fist") == "drag":
+                    ev.append(Event("drag_start", at, pulse=True))
+                    self.mode = "drag"
+                else:                           # discrete action: once per hold
+                    ev.append(Event("gesture", {"id": "fist", "pos": (at[0], at[1])}, pulse=True))
+                    self.mode = "fist_done"
+        elif m == "fist_done":
+            if label != "fist":
+                self.mode = "move"
         elif m == "drag":
             if label != "fist":
                 ev.append(Event("drag_end", self.cur))
@@ -153,13 +170,14 @@ class PointerHand:
         if d > h["dwell_radius"]:
             self.dwell_pos, self.dwell_t = px, now
         elif now - self.dwell_t >= h["dwell_time"]:
-            ev.append(Event("click", (pos[0], pos[1], 1), pulse=True))
+            if bindings.action_for(self.cfg, "dwell") != "none":
+                ev.append(Event("gesture", {"id": "dwell", "pos": (pos[0], pos[1])}, pulse=True))
             self.dwell_armed = False
             self.last_click = -1e9
 
 
 class CommandHand:
-    """Left hand: pinch = right click, two-finger vertical = scroll, fast open-palm swipe = space."""
+    """Left hand: pinch, two-finger vertical = scroll, fast confident-open-palm swipe."""
 
     def __init__(self, cfg):
         self.cfg, self.h = cfg, cfg["hand"]
@@ -174,19 +192,20 @@ class CommandHand:
         self.last_scroll = -1e9
         self.swipe = deque()
         self.swipe_last = -1e9
-        self.scrolling = False
 
     def step(self, hs, now, ev, cursor, veto_swipe):
         h = self.h
+        act = lambda g: bindings.action_for(self.cfg, g)
         pn, label = hs.pinch, hs.label
         if pn.confirmed:
             if not self.pinched:
                 self.pinched = True
-                ev.append(Event("right_click", cursor, pulse=True))
+                if act("left_pinch") != "none":
+                    ev.append(Event("gesture", {"id": "left_pinch", "pos": cursor}, pulse=True))
         else:
             self.pinched = False
-        # scroll
-        if label == "scroll" and not pn.raw:
+        # scroll (two fingers up; hand up = positive px; the executor flips it for scroll_inverted)
+        if label == "scroll" and not pn.raw and act("two_finger") != "none":
             y = self.fy(hs.anchor[1] * REF, now) / REF
             if self.prev_y is not None:
                 d = (self.prev_y - y)                    # hand up -> positive (scroll up)
@@ -202,10 +221,10 @@ class CommandHand:
         else:
             self.prev_y, self.acc = None, 0.0
             self.fy.reset()
-        # swipe
+        # swipe: only from a confident open palm (never right after a two-finger pose)
         x = 1.0 - hs.anchor[0]
         y = hs.anchor[1]
-        if label == "open" and not pn.raw:
+        if hs.confident_open(now) and not pn.raw:
             self.swipe.append((now, x, y))
             while self.swipe and now - self.swipe[0][0] > h["swipe_time"]:
                 self.swipe.popleft()
@@ -213,10 +232,12 @@ class CommandHand:
             dx, dy = x - x0, y - y0
             if (now - self.swipe_last >= h["swipe_cooldown"] and abs(dx) >= h["swipe_dist"]
                     and abs(dy) < 0.5 * abs(dx) and not veto_swipe(dx, t0, now)):
-                self.swipe_last = now
+                # hand moves to the user's left (dx < 0 in mirrored x) = swipe_left
+                gid = "swipe_left" if dx < 0 else "swipe_right"
                 self.swipe.clear()
-                # hand moves to the user's left -> next space (trackpad convention)
-                ev.append(Event("space", "right" if dx < 0 else "left", pulse=True))
+                if act(gid) != "none":
+                    self.swipe_last = now
+                    ev.append(Event("gesture", {"id": gid, "pos": None}, pulse=True))
         else:
             self.swipe.clear()
 
@@ -294,14 +315,16 @@ class GestureEngine:
             self.labels[role] = "pinch" if st.pinch.confirmed else st.label
             self.debug.append({"role": role, "vote": t.vote, "score": t.score, "label_mp": t.obs.label,
                                "fingers": dict(st.states), "ratio": st.ratio, "pose": st.label,
-                               "pinch": st.pinch.confirmed, "anchor": st.anchor, "lms": t.obs.lms})
+                               "pose_raw": st.pose_raw, "reach": dict(st.reach),
+                               "pinch": st.pinch.confirmed, "pinch_raw": st.pinch.raw,
+                               "anchor": st.anchor, "lms": t.obs.lms})
         speed = int(cfg.get("pointer_speed", 2))
         # right hand = pointer
         if "right" in by and speed > 0:
             self.pointer.step(self.states["right"], now, ev, self.screen,
                               POINTER_SCALE.get(speed, 1.0), bool(cfg.get("dwell_click")))
             r = self.states["right"]
-            if r.label == "open":
+            if r.confident_open(now):
                 self.xr_hist.append((now, 1.0 - r.anchor[0]))
             while self.xr_hist and now - self.xr_hist[0][0] > 0.6:
                 self.xr_hist.popleft()
@@ -315,19 +338,17 @@ class GestureEngine:
             self.command.lost()
         # both palms open -> tiling
         if (cfg.get("tiling", True) and "right" in by and "left" in by
-                and self.labels["right"] == "open" and self.labels["left"] == "open"):
+                and self.states["right"].confident_open(now) and self.states["left"].confident_open(now)
+                and not self.states["right"].pinch.raw and not self.states["left"].pinch.raw):
             self._tile(self.states["right"].anchor, self.states["left"].anchor, now, ev)
         else:
             self.tile_hist.clear()
         for e in ev:
-            if e.kind == "click":
-                self.flash("right · click" if e.value[2] == 1 else "right · double click", now, 0.5)
-            elif e.kind == "right_click":
-                self.flash("left · right click", now, 0.5)
-            elif e.kind == "drag_start":
-                self.flash("right · drag", now, 0.3)
-            elif e.kind == "space":
-                self.flash("left · space " + e.value, now, 0.8)
+            gid = bindings.gesture_of(e)
+            if gid and e.kind in ("gesture", "drag_start"):
+                role = {"pointer": "right", "command": "left"}.get(bindings.GESTURES[gid]["hand"], "both")
+                label = bindings.ACTIONS[bindings.action_for(cfg, gid)]["label"]
+                self.flash(f"{role} · {label}", now, 0.5 if e.kind == "gesture" else 0.3)
         return ev
 
     def _tile(self, right, left, now, ev):
@@ -344,7 +365,9 @@ class GestureEngine:
                  ("fill", dgap / c["tile_gap"]), ("center", -dgap / c["tile_gap"])]
         mode, score = max(cands, key=lambda t: t[1])
         if score >= 1.0:
-            ev.append(Event("tile", mode, pulse=True))
-            self.tile_last = now
+            gid = {"left": "palms_left", "right": "palms_right", "fill": "palms_apart",
+                   "center": "palms_together"}[mode]
             self.tile_hist.clear()
-            self.flash("tile " + mode, now, 0.8)
+            if bindings.action_for(self.cfg, gid) != "none":
+                ev.append(Event("gesture", {"id": gid, "pos": None}, pulse=True))
+                self.tile_last = now

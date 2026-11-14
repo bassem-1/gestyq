@@ -1,6 +1,6 @@
 """Popover content (300 wide, black). Laid out by hand from the haptyq spec."""
 import objc
-from AppKit import NSMakeRect
+from AppKit import NSBezierPath, NSMakeRect
 
 from config import HEAD_NAMES, POINTER_NAMES, VERSION
 from . import theme as T
@@ -18,6 +18,29 @@ class Banner(Flipped):
         p.stroke()
 
 
+def blacken(view):
+    """NSPopover draws a translucent vibrancy material (backdrop blur + chameleon tint, masked to the
+    body and arrow) in the sublayers of its frame view. Hide those and paint the shaped layers black."""
+    from AppKit import NSColor
+    from Quartz import CGColorCreateGenericRGB
+    w = view.window()
+    if w is None:
+        return
+    w.setBackgroundColor_(NSColor.clearColor())
+    frame = w.contentView().superview()
+    frame.setWantsLayer_(True)
+    black = CGColorCreateGenericRGB(0, 0, 0, 1)
+    for layer in list(frame.layer().sublayers() or []):
+        if layer.delegate() is not None:         # the content views' layers, not the material
+            continue
+        for sub in list(layer.sublayers() or []):
+            if sub.className() == "CABackdropLayer" or sub.className() == "CAChameleonLayer":
+                sub.setHidden_(True)
+            else:
+                sub.setBackgroundColor_(black)
+        layer.setBackgroundColor_(black)
+
+
 class PopoverContent(Flipped):
     """`model` provides: cfg, state, set(key, value), set_enabled(bool), trusted, grant_access(),
     refresh_trust(), cycle_camera(), camera_label(), quit()."""
@@ -29,6 +52,13 @@ class PopoverContent(Flipped):
         self._build()
         self.refresh()
         return self
+
+    def viewDidMoveToWindow(self):
+        blacken(self)
+
+    def drawRect_(self, rect):
+        T.black().setFill()
+        NSBezierPath.fillRect_(self.bounds())
 
     # -- construction
     @objc.python_method
@@ -77,6 +107,9 @@ class PopoverContent(Flipped):
         self.addSubview_(self.rule1)
         self.addSubview_(self.rule2)
         self.quit_btn = TextButton.alloc().initWithTitle_size_color_callback_("quit", T.SIZE_TITLE, "fg", m.quit)
+        self.open_btn = TextButton.alloc().initWithTitle_size_color_callback_(
+            "open gestyq", T.SIZE_TITLE, "fg", lambda: m.open_window())
+        self.addSubview_(self.open_btn)
         self.version = make_text("v" + VERSION, T.SIZE_SMALL, "dim", h=16)
         self.addSubview_(self.quit_btn)
         self.addSubview_(self.version)
@@ -149,7 +182,8 @@ class PopoverContent(Flipped):
         y += 8
         self.rule2.setFrameOrigin_((PAD, y))
         y += 9
-        self.quit_btn.setFrameOrigin_((PAD - 6, y))
+        self.open_btn.setFrameOrigin_((PAD - 6, y))
+        self.quit_btn.setFrameOrigin_((PAD - 6 + self.open_btn.frame().size.width + 4, y))
         self.version.setFrameOrigin_((W - PAD - self.version.frame().size.width, y + 4))
         y += 24 + PAD
         self.setFrameSize_((W, y))

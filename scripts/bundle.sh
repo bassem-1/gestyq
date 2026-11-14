@@ -1,6 +1,7 @@
 #!/bin/bash
-# Builds dist/gestyq.app (a tiny launcher around app.py) and installs it to /Applications.
-# The app runs the source in this folder with the python picked below, so code edits need no rebuild.
+# Builds dist/gestyq.app and installs it to /Applications. The launcher EMBEDS the python picked below
+# (links its libpython, sets PYTHONHOME) so the bundle's own process runs app.py. It runs the source in
+# this folder, so code edits need no rebuild; rebuild only if the folder or the python env moves.
 # Usage: scripts/bundle.sh [--no-install]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -15,12 +16,20 @@ fi
 [ -n "$PY" ] || PY="$(python3 -c 'import sys; print(sys.executable)')"
 "$PY" -c "import mediapipe, cv2, AppKit" || { echo "error: $PY is missing requirements.txt packages" >&2; exit 1; }
 
+PYHOME="$("$PY" -c 'import sys; print(sys.prefix)')"
+LIBDIR="$("$PY" -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
+LIBPY="libpython$("$PY" -c 'import sysconfig; print(sysconfig.get_config_var("py_version_short"))').dylib"
+[ -f "$LIBDIR/$LIBPY" ] || { echo "error: $LIBDIR/$LIBPY not found (need a shared libpython)" >&2; exit 1; }
+LIBNAME="$(basename "$LIBPY" .dylib)"; LIBNAME="${LIBNAME#lib}"
+ARCH="$(lipo -archs "$LIBDIR/$LIBPY" | awk '{print $1}')"     # build for the dylib's arch
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-clang -O2 -Wall -mmacosx-version-min=12.0 -arch arm64 -arch x86_64 \
+clang -O2 -Wall -mmacosx-version-min=12.0 -arch "$ARCH" \
+  -L"$LIBDIR" -l"$LIBNAME" -Wl,-rpath,"$LIBDIR" \
   -o "$APP/Contents/MacOS/gestyq" "$ROOT/launcher/main.c"
 printf '%s\n' "$ROOT" > "$APP/Contents/Resources/source_dir"
-printf '%s\n' "$PY" > "$APP/Contents/Resources/python"
+printf '%s\n' "$PYHOME" > "$APP/Contents/Resources/python_home"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

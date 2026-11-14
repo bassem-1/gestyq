@@ -11,6 +11,9 @@ class SharedState:
             "caption": "paused",
             "pulse_n": 0,           # increments on every fired action
             "hands": 0,
+            "window_open": False,   # app window shown -> camera runs even while OFF (preview)
+            "preview": None,        # window only: {n, t, jpg, aspect, debug, head, gestures, caption}
+            "recording": None,      # {active, elapsed} while the window is open
             "screen": None,         # {"visible": (x, y, w, h), "primary_h": h}, published by the UI thread
         }
         self.commands = []

@@ -4,23 +4,27 @@ MediaPipe and the gesture engine and posts Quartz events itself."""
 import atexit
 import os
 import signal
+import sys
 import time
 
 import objc
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSApplicationDidChangeScreenParametersNotification,
-                    NSObject, NSScreen)
+                    NSMenu, NSMenuItem, NSObject, NSScreen)
 from Foundation import NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 import actions as actions_mod
+import bindings
 import config
 import login
 from state import SharedState
 from ui.gadget import GadgetController
-from ui.menubar import MenuBar
+from ui.menubar import MenuBar, dock_icon
+from ui.window import MainWindowController
 from vision import VisionThread, list_cameras, pick_camera
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.environ.get("GESTYQ_APP")          # set by the gestyq.app launcher
+BACKGROUND = "--background" in sys.argv    # the login item: stay in the menu bar, no window
 
 
 def request_camera_access():
@@ -45,6 +49,7 @@ class Model:
         self.saver = config.Debounced(lambda: config.save(self.cfg), 0.3)
         self.trusted = actions_mod.is_trusted()
         self.on_change = lambda: None
+        self.open_window = lambda: None         # set by the delegate
         self.quitting = False
 
     def set(self, key, value):
@@ -54,6 +59,23 @@ class Model:
             self.vision.reload_camera()
         elif key == "launch_at_login":
             login.set_enabled(bool(value), HERE, app=APP)
+        self.on_change()
+
+    # -- window / bindings
+    def set_window_open(self, open_):
+        self.vision.set_window_open(open_)      # open: camera runs for preview even while OFF
+
+    def set_recording(self, on):
+        self.vision.set_recording(on)
+
+    def set_binding(self, gesture, action):
+        self.cfg.setdefault("bindings", {})[gesture] = action
+        self.saver.poke()
+        self.on_change()
+
+    def reset_bindings(self):
+        self.cfg["bindings"] = dict(bindings.DEFAULT_BINDINGS)
+        self.saver.poke()
         self.on_change()
 
     def set_enabled(self, on):
@@ -100,6 +122,11 @@ class Model:
         NSApplication.sharedApplication().terminate_(None)
 
 
+class _Menu(NSObject):
+    def quit_(self, sender):
+        self.model.quit()
+
+
 class Delegate(NSObject):
     def applicationDidFinishLaunching_(self, note):
         self.model = Model()
@@ -108,7 +135,10 @@ class Delegate(NSObject):
         m.vision.start()
         self.gadget = GadgetController(m)
         self.menubar = MenuBar(m)
+        self.window = MainWindowController.alloc().initWithModel_(m)
+        m.open_window = self.show_window
         m.on_change = self.changed
+        self.build_menu()
         self.gadget.apply()
         self.last_pulse = 0
         self.last_screen = self.last_trust = 0.0
@@ -121,6 +151,38 @@ class Delegate(NSObject):
         signal.signal(signal.SIGINT, lambda *a: m.quit())
         atexit.register(m.actions.release_all)
         self.publish_screen()
+        NSApplication.sharedApplication().setApplicationIconImage_(dock_icon())
+        if not BACKGROUND:
+            self.show_window()
+
+    def applicationShouldHandleReopen_hasVisibleWindows_(self, app, has_visible):
+        self.show_window()
+        return True
+
+    @objc.python_method
+    def show_window(self):
+        if self.menubar.is_open:
+            self.menubar.popover.performClose_(None)
+        self.window.show()
+
+    @objc.python_method
+    def build_menu(self):
+        """Minimal main menu so cmd-q and cmd-w work while the window is up."""
+        self.menu_target = _Menu.alloc().init()
+        self.menu_target.model = self.model
+        bar = NSMenu.alloc().init()
+        for title, items in (("gestyq", [("quit gestyq", "quit:", "q", self.menu_target)]),
+                             ("window", [("close", "performClose:", "w", None)])):
+            top = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, None, "")
+            sub = NSMenu.alloc().initWithTitle_(title)
+            for t, action, key, target in items:
+                it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(t, action, key)
+                if target is not None:
+                    it.setTarget_(target)
+                sub.addItem_(it)
+            top.setSubmenu_(sub)
+            bar.addItem_(top)
+        NSApplication.sharedApplication().setMainMenu_(bar)
 
     def applicationWillTerminate_(self, note):
         self.model.vision.set_enabled(False)

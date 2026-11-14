@@ -1,10 +1,11 @@
 """Menu bar item: custom-drawn 18x18 template glyph (open hand) + NSPopover."""
 import objc
+from Foundation import NSTimer
 from AppKit import (NSAffineTransform, NSApplication, NSBezierPath, NSColor, NSImage, NSMakeRect, NSMinYEdge,
                     NSObject, NSPopover, NSPopoverBehaviorTransient, NSStatusBar, NSViewController)
 
 from . import theme as T
-from .popover import PopoverContent
+from .popover import PopoverContent, blacken
 
 # An open hand: palm, four fingers, thumb. One path so the off-state alpha doesn't double up where
 # shapes overlap. Deliberately unlike haptyq's floating bars.
@@ -40,9 +41,34 @@ def icon(enabled):
     return img
 
 
+def dock_icon():
+    """Red open hand on black, 128x128, for the dock while the window is open."""
+    def draw(rect):
+        T.black().setFill()
+        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(8, 8, 112, 112), 26, 26).fill()
+        t = NSAffineTransform.transform()
+        t.translateXBy_yBy_(64 - 9 * 4.2, 64 - 9 * 4.2)
+        t.scaleBy_(4.2)
+        path = hand_path()
+        path.transformUsingAffineTransform_(t)
+        T.red().setFill()
+        path.fill()
+        return True
+
+    return NSImage.imageWithSize_flipped_drawingHandler_((128, 128), False, draw)
+
+
 class _Target(NSObject):
     def toggle_(self, sender):
         self.owner.toggle()
+
+
+class _PopoverDelegate(NSObject):
+    def popoverDidShow_(self, note):
+        # the material layers are created lazily after the first display: repaint a few times
+        blacken(self.content)
+        for d in (0.02, 0.1, 0.4):
+            NSTimer.scheduledTimerWithTimeInterval_repeats_block_(d, False, lambda t: blacken(self.content))
 
 
 class MenuBar:
@@ -64,6 +90,9 @@ class MenuBar:
         self.popover.setBehavior_(NSPopoverBehaviorTransient)
         self.popover.setAppearance_(T.dark_appearance())
         self.popover.setAnimates_(False)
+        self.pdel = _PopoverDelegate.alloc().init()
+        self.pdel.content = self.content
+        self.popover.setDelegate_(self.pdel)
 
     def set_enabled(self, on):
         if on != self.shown:
@@ -82,6 +111,8 @@ class MenuBar:
     def refresh(self):
         self.content.refresh()
         self.popover.setContentSize_(self.content.frame().size)
+        if self.popover.isShown():
+            blacken(self.content)
 
     @property
     def is_open(self):
