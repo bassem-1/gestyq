@@ -378,3 +378,70 @@ def test_swipe_and_palms_bound_to_none_emit_nothing_and_flash_uses_label():
     s.step(R(0.4, pinch=1.0), n=4)
     assert s.e.caption(s.t) == "right · right click"
     s.step(None, Lh(0.7), n=10)
+
+
+# ---- phantom hands: spawn gate and face veto
+def test_three_frame_blip_never_acts():
+    s = Sim()
+    s.step(right=R(), left=Lh(), n=3)
+    s.step(n=10)
+    assert s.log == [] and s.e.labels == {}
+
+
+def test_hand_gets_a_role_after_spawn_frames():
+    s = Sim()
+    s.step(right=R(), n=4)
+    assert s.e.labels == {}
+    s.step(right=R(), n=1)
+    assert s.e.labels == {"right": "open"}
+
+
+def test_blip_with_gap_restarts_the_spawn_count():
+    s = Sim()
+    s.step(right=R(), n=4)
+    s.step(n=1)
+    s.step(right=R(), n=4)
+    assert s.e.labels == {}
+
+
+FACE = (0.35, 0.15, 0.65, 0.55)      # centre (0.5, 0.35)
+
+
+def _labels_with_face(scale, face=FACE, conf=0.9):
+    e = GestureEngine(cfg(), screen=(1920, 1080))
+    for i in range(8):
+        e.update([obs(make_hand("right", x=0.5, y=0.5, scale=scale), "Left", conf)], i / 30, face_box=face)
+    return e.labels, e.rejected
+
+
+def test_small_hand_inside_face_box_is_dropped():
+    # palm anchor ~ (0.5, 0.41), inside the shrunk box; palm_scale ~0.05 vs face height 0.4/1.78
+    labels, rej = _labels_with_face(0.8)
+    assert labels == {} and len(rej) == 1
+
+
+def test_big_hand_in_front_of_face_is_kept():
+    labels, rej = _labels_with_face(2.4)
+    assert labels == {"right": "open"} and rej == []
+
+
+def test_low_confidence_hand_inside_face_dropped_even_if_big():
+    labels, _ = _labels_with_face(2.4, conf=0.5)
+    assert labels == {}
+
+
+def test_hand_outside_face_box_is_kept_and_no_face_box_changes_nothing():
+    e = GestureEngine(cfg(), screen=(1920, 1080))
+    for i in range(8):
+        e.update([obs(make_hand("right", x=0.2, y=0.7), "Left")], i / 30, face_box=FACE)
+    assert e.labels == {"right": "open"}
+    labels, rej = _labels_with_face(0.8, face=None)
+    assert labels == {"right": "open"} and rej == []
+
+
+def test_face_box_expires_after_half_a_second():
+    e = GestureEngine(cfg(), screen=(1920, 1080))
+    e.update([], 0.0, face_box=FACE)
+    for i in range(8):
+        e.update([obs(make_hand("right", x=0.5, y=0.5, scale=0.8), "Left")], 1.0 + i / 30)
+    assert e.labels == {"right": "open"}

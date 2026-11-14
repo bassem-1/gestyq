@@ -135,7 +135,9 @@ class Detectors:
         pt = lambda i: (lm[i].x, lm[i].y)
         mat = res.facial_transformation_matrixes[0] if res.facial_transformation_matrixes else None
         bs = {b.category_name: b.score for b in res.face_blendshapes[0]} if res.face_blendshapes else None
-        return FaceObs(pt(1), pt(234), pt(454), pt(10), pt(152), mat), bs
+        xs, ys = [p.x for p in lm], [p.y for p in lm]
+        box = (min(xs), min(ys), max(xs), max(ys))
+        return FaceObs(pt(1), pt(234), pt(454), pt(10), pt(152), mat, box), bs
 
     def close(self):
         for d in (self.hand, self.face_lm):
@@ -269,7 +271,7 @@ class VisionThread(threading.Thread):
             print("model download failed:", e)
             self.state.update(camera="no camera", caption="no camera")
             return
-        was_on, fails, frame_i = False, 0, 0
+        was_on, fails, frame_i, face_box = False, 0, 0, None
         try:
             while not self.stop_evt.is_set():
                 if not camera_wanted(self.on_evt.is_set(), self.win_evt.is_set()):
@@ -330,13 +332,15 @@ class VisionThread(threading.Thread):
                 hands = self.det.hands(img, ts)
                 if self.recorder.active:
                     self.recorder.write(now, w / h, hands)
-                evs = self.engine.update(hands, now)
+                evs = self.engine.update(hands, now, face_box)
+                face_box = None
 
                 head_lvl = int(self.cfg.get("head_level", 0))
                 eye_on = bool(self.cfg.get("eye_corners"))
                 if (head_lvl > 0 or eye_on) and frame_i % self.cfg["camera"]["face_every"] == 0:
                     self.last_ts_f = max(self.last_ts_f + 1, ts)
                     face, bs = self.det.face(img, self.last_ts_f)
+                    face_box = face.box if face else None
                     if head_lvl > 0:
                         hev = self.head.update(face, now, head_lvl, self.engine.dragging)
                         for e in hev:

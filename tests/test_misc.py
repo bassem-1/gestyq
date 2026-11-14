@@ -170,3 +170,19 @@ def test_pure_modules_have_no_platform_imports():
                 mods = [node.module or ""]
             for name in mods:
                 assert name.split(".")[0] not in banned, (m, name)
+
+
+def test_old_hand_defaults_are_dropped_on_load(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"config_version": 2, "hand": {
+        "min_detection_conf": 0.6, "min_presence_conf": 0.6, "swipe_dist": 0.25, "swipe_time": 0.35,
+        "pinch_on": 0.2}}))
+    h = config.load(str(p))["hand"]
+    assert h["min_detection_conf"] == 0.7 and h["min_presence_conf"] == 0.7
+    assert h["swipe_dist"] == 0.18 and h["swipe_time"] == 0.45 and h["pinch_on"] == 0.2
+
+
+def test_customised_detection_conf_survives_upgrade(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"config_version": 2, "hand": {"min_detection_conf": 0.8}}))
+    assert config.load(str(p))["hand"]["min_detection_conf"] == 0.8

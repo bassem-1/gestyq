@@ -305,6 +305,8 @@ class _Track:
         self.seen = now
         self.role = None
         self.flip_since = None
+        self.frames = 1          # consecutive frames seen (spawn gate)
+        self.live = False        # seen >= spawn_frames in a row: may get a role and act
 
 
 @dataclass
@@ -320,8 +322,9 @@ class HandTracker:
     """Tracks up to two hands by nearest wrist, accumulates an exponential vote per track and
     assigns the roles. A role only flips when the vote is decisively reversed for > flip_time."""
 
-    def __init__(self, hcfg):
+    def __init__(self, hcfg, spawn_frames=1):
         self.c = hcfg
+        self.spawn_frames = max(1, int(spawn_frames))
         self.tracks = []
 
     def reset(self):
@@ -347,18 +350,25 @@ class HandTracker:
         obs_list = list(obs_list)[:2]
         self.tracks = [t for t in self.tracks if now - t.seen <= c["track_ttl"]]
         matched = self._match(obs_list, now)
+        keep = set(map(id, matched.values()))        # a new track missing one frame was a blip: forget it
+        self.tracks = [t for t in self.tracks if t.live or id(t) in keep]
         cur = []
         for oi, o in enumerate(obs_list):
             s = instant_score(o, c)
             t = matched.get(oi)
             if t is None:
                 t = _Track(o, s, now)
+                t.live = self.spawn_frames <= 1
                 self.tracks.append(t)
             else:
+                t.frames += 1
+                if t.frames >= self.spawn_frames:
+                    t.live = True
                 dt = clamp(now - t.t, 0.0, 0.25)
                 t.vote += (1.0 - math.exp(-dt / c["vote_tau"])) * (s - t.vote)
             t.score, t.t, t.seen, t.wrist = s, now, now, o.lms[0][:2]
             cur.append((t, o))
+        cur = [(t, o) for t, o in cur if t.live]
         self._assign([t for t, _ in cur], now)
         out = []
         for t, o in cur:

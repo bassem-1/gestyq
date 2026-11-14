@@ -111,3 +111,56 @@ def test_errors_never_escape(capsys):
         def key(self, *a, **k): raise RuntimeError("x")
     Boom(cfg()).execute(gest("swipe_left"))
     assert "action error" in capsys.readouterr().out
+
+
+# ---- real key sequences (CGEventPost recorded)
+def _seq(code, flags):
+    import Quartz
+    import actions
+    posted, downs = [], {}
+    orig_post, orig_create = Quartz.CGEventPost, Quartz.CGEventCreateKeyboardEvent
+
+    def create(src, kc, down):
+        ev = orig_create(src, kc, down)
+        downs[id(ev)] = (kc, down)
+        return ev
+    Quartz.CGEventCreateKeyboardEvent = create
+    Quartz.CGEventPost = lambda tap, ev: posted.append((*downs[id(ev)], Quartz.CGEventGetFlags(ev)))
+    try:
+        Actions(cfg(), None).key_sequence(code, flags, sleep=lambda s: None)
+    finally:
+        Quartz.CGEventPost, Quartz.CGEventCreateKeyboardEvent = orig_post, orig_create
+    return posted
+
+
+def test_cmd_tab_presses_command_around_tab():
+    import Quartz
+    C = Quartz.kCGEventFlagMaskCommand
+    got = _seq(48, MODS["command"])
+    assert [(k, d) for k, d, _ in got] == [(55, True), (48, True), (48, False), (55, False)]
+    assert [f & C for _, _, f in got] == [C, C, C, 0]
+
+
+def test_cmd_shift_tab_orders_and_flags():
+    import Quartz
+    C, S = Quartz.kCGEventFlagMaskCommand, Quartz.kCGEventFlagMaskShift
+    got = _seq(48, MODS["command"] | MODS["shift"])
+    assert [(k, d) for k, d, _ in got] == [(56, True), (55, True), (48, True), (48, False), (55, False), (56, False)]
+    m = C | S
+    assert [f & m for _, _, f in got] == [S, m, m, m, S, 0]
+
+
+def test_ctrl_arrow_carries_fn_and_numpad():
+    import Quartz
+    got = _seq(124, MODS["control"])
+    assert [(k, d) for k, d, _ in got] == [(59, True), (124, True), (124, False), (59, False)]
+    need = Quartz.kCGEventFlagMaskControl | Quartz.kCGEventFlagMaskSecondaryFn | Quartz.kCGEventFlagMaskNumericPad
+    assert got[1][2] & need == need and got[2][2] & need == need
+    assert got[3][2] & Quartz.kCGEventFlagMaskControl == 0
+
+
+def test_f11_has_fn_and_plain_keys_have_none():
+    import Quartz
+    got = _seq(103, 0)
+    assert [(k, d) for k, d, _ in got] == [(103, True), (103, False)]
+    assert got[0][2] & Quartz.kCGEventFlagMaskSecondaryFn

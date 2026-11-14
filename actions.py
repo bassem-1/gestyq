@@ -6,6 +6,7 @@ Every event is resolved to a gesture id (bindings.gesture_of) and runs the actio
 cfg["bindings"] (bindings.action_for); the action ids are bindings.ACTIONS. Media / volume keys are
 NX system-defined events (built with AppKit.NSEvent, imported lazily, posted as CGEvents).
 """
+import queue
 import subprocess
 import threading
 import time
@@ -17,9 +18,17 @@ from gestures import tile_rect
 
 # virtual key codes
 K_TAB, K_LEFT, K_RIGHT, K_DOWN, K_UP, K_F11, K_3 = 48, 123, 124, 125, 126, 103, 20
+K_CMD, K_SHIFT, K_OPT, K_CTRL = 55, 56, 58, 59
+ARROWS = (K_LEFT, K_RIGHT, K_DOWN, K_UP)
+FN_FLAG = Quartz.kCGEventFlagMaskSecondaryFn
+NUMPAD_FLAG = Quartz.kCGEventFlagMaskNumericPad
+KEY_STEP = 0.01        # s between the steps of a key sequence
+KEY_HOLD = 0.07        # s the modifiers stay down after the main key (cmd+tab needs the switcher to register)
 NX_SOUND_UP, NX_SOUND_DOWN, NX_PLAY = 0, 1, 16     # NX_KEYTYPE_*
 MODS = {"control": Quartz.kCGEventFlagMaskControl, "command": Quartz.kCGEventFlagMaskCommand,
         "option": Quartz.kCGEventFlagMaskAlternate, "shift": Quartz.kCGEventFlagMaskShift}
+# modifier key presses, in press order: (virtual key, flag)
+MOD_KEYS = ((K_CTRL, MODS["control"]), (K_OPT, MODS["option"]), (K_SHIFT, MODS["shift"]), (K_CMD, MODS["command"]))
 NOTIFICATION_CENTER = (
     'tell application "System Events" to tell process "ControlCenter" to '
     'click menu bar item 1 of menu bar 1 whose description is "Clock"')
@@ -54,6 +63,7 @@ class Actions:
         self.last = None
         self._b, self._bt = None, 0.0
         self._last_click = -1e9
+        self._keyq, self._keythread = queue.Queue(), None
 
     # -- geometry
     def bounds(self):
@@ -117,10 +127,57 @@ class Actions:
 
     # -- keys / scroll
     def key(self, code, flags=0):
-        for down in (True, False):
-            ev = Quartz.CGEventCreateKeyboardEvent(None, code, down)
-            Quartz.CGEventSetFlags(ev, flags)
+        """Queue a key chord. A worker thread plays it (real modifier key presses and short holds), so
+        the vision thread never sleeps."""
+        if self._keythread is None:
+            self._keythread = threading.Thread(target=self._key_worker, daemon=True, name="gestyq-keys")
+            self._keythread.start()
+        self._keyq.put((code, flags))
+
+    def _key_worker(self):
+        while True:
+            code, flags = self._keyq.get()
+            try:
+                self.key_sequence(code, flags)
+            except Exception as e:
+                print("key error:", code, flags, e)
+
+    @staticmethod
+    def key_flags(code, flags):
+        """Flags a real key press carries: arrows also have fn + numpad set, F-keys have fn. Mission
+        Control's ctrl+arrow hotkeys ignore arrow events without them."""
+        if code in ARROWS:
+            return flags | FN_FLAG | NUMPAD_FLAG
+        if code == K_F11:
+            return flags | FN_FLAG
+        return flags
+
+    def key_sequence(self, code, flags=0, sleep=time.sleep):
+        """modifier downs (flags accumulate) -> key down/up with the full flags -> hold -> modifier ups
+        in reverse (flags decrease). The release of the held Command is what commits cmd+tab."""
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        mods = [(k, f) for k, f in MOD_KEYS if flags & f]
+        cur = 0
+
+        def post(kc, down, fl):
+            ev = Quartz.CGEventCreateKeyboardEvent(src, kc, down)
+            Quartz.CGEventSetFlags(ev, fl)
             self._post(ev)
+
+        for kc, f in mods:
+            cur |= f
+            post(kc, True, cur)
+            sleep(KEY_STEP)
+        full = self.key_flags(code, flags)
+        post(code, True, full)
+        sleep(KEY_STEP)
+        post(code, False, full)
+        if mods:
+            sleep(KEY_HOLD)
+        for kc, f in reversed(mods):
+            cur &= ~f
+            post(kc, False, cur)
+            sleep(KEY_STEP)
 
     def scroll(self, dy):
         ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitPixel, 1, int(dy))

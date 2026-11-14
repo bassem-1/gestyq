@@ -73,7 +73,7 @@ any held mouse button and the camera.
 | right | still for 0.9 s | dwell click (popover switch, off by default) |
 | left | thumb + index pinch | right click |
 | left | index + middle up, move up/down | scroll |
-| left | open palm, fast sideways swipe | next / previous space |
+| left | open palm, sideways swipe (0.18 of the frame in 0.45 s) | next / previous space |
 | both | open palms: move together left/right, spread, bring together | tile window left/right, fill, centre |
 | head | turn right and back / left and back | next app (cmd+tab) / previous app |
 | head | tilt up and hold 0.6 s | display sleep |
@@ -93,7 +93,13 @@ keys in your settings file (the popover and window write the rest):
 - `hand.pinch_on`, `hand.pinch_off`, `hand.pinch_frames`: pinch hysteresis
 - `hand.click_lookback`, `hand.fist_hold`, `hand.loss_grace`, `hand.double_click_gap`
 - `hand.ext_deg`, `hand.curl_deg`: finger joint angle thresholds
-- `hand.scroll_gain`, `hand.scroll_invert`, `hand.swipe_dist`, `hand.tile_*`
+- `hand.scroll_gain`, `hand.scroll_invert`, `hand.tile_*`
+- `hand.swipe_dist`, `hand.swipe_time`: open-palm swipe, 0.18 of the frame width within 0.45 s
+- `hand.spawn_frames`: a new hand must be seen this many frames in a row (5) before it acts
+- `hand.face_palm_ratio`, `hand.face_min_conf`, `hand.face_hold`: face veto. a hand whose palm centre is inside the
+  face box (shrunk to 70%) is dropped when its palm is smaller than 0.4 x the face height or its handedness
+  confidence is under 0.6. needs head or eye tracking on (that is what finds the face)
+- `hand.min_detection_conf`, `hand.min_presence_conf`: 0.7
 - `handedness.*`: label, geometry and position weights, vote time constant, flip margin and time
 - `head.yaw_deg`, `head.pitch_deg`: thresholds at sensitivity `normal`; `head.yaw_per_deg`,
   `head.pitch_per_deg` convert the nose-offset proxy to degrees

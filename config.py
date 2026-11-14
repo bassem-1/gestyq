@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "config.json")          # shipped defaults, never written by the app
 USER_PATH = os.path.expanduser("~/Library/Application Support/gestyq/config.json")
 VERSION = "0.3.0"
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 
 def user_path():
@@ -72,15 +72,19 @@ DEFAULTS = {
         "scroll_gain": 3000,      # px per full frame height of hand travel (10 cm is about a page)
         "scroll_deadzone": 0.0008,
         "scroll_invert": False,
-        "swipe_dist": 0.25,
-        "swipe_time": 0.35,
+        "swipe_dist": 0.18,       # fraction of frame width ...
+        "swipe_time": 0.45,       # ... within this many s (0.25 in 0.35 s was faster than a natural swipe)
         "swipe_cooldown": 1.0,
         "tile_window": 0.6,
         "tile_move": 0.15,
         "tile_gap": 0.15,
         "tile_cooldown": 1.0,
-        "min_detection_conf": 0.6,
-        "min_presence_conf": 0.6,
+        "spawn_frames": 5,        # a new hand must be seen this many frames in a row before it acts
+        "face_hold": 0.5,         # s the last face box keeps vetoing
+        "face_palm_ratio": 0.4,   # hand inside the face box and palm < this x face height = phantom
+        "face_min_conf": 0.6,     # ... or handedness confidence below this
+        "min_detection_conf": 0.7,
+        "min_presence_conf": 0.7,
         "min_tracking_conf": 0.5,
     },
     "handedness": {
@@ -129,7 +133,9 @@ def _merge(base, over):
 # values the old default config shipped with and that were retuned: a saved copy of an OLD default
 # must not pin the new default (the app used to write its whole config).
 LEGACY_DEFAULTS = {"hand": {"ext_deg": 160.0, "curl_deg": 110.0, "vote_frames": 5, "pinch_on": 0.25,
-                            "pinch_off": 0.40, "scroll_gain": 1800, "scroll_deadzone": 0.002}}
+                            "pinch_off": 0.40, "scroll_gain": 1800, "scroll_deadzone": 0.002,
+                            "swipe_dist": 0.25, "swipe_time": 0.35,
+                            "min_detection_conf": 0.6, "min_presence_conf": 0.6}}
 
 
 def _upgrade(raw):

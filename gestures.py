@@ -12,7 +12,7 @@ import bindings
 from config import POINTER_SCALE
 from events import Event
 from filters import DeadZone, OneEuro, OneEuro2D, RingBuffer, clamp
-from tracking import HandState, HandTracker
+from tracking import HandState, HandTracker, iso, palm_anchor, palm_scale
 
 REF = 1000.0   # filters work in 1/1000-screen units so cutoffs/beta are resolution independent
 
@@ -248,7 +248,9 @@ class CommandHand:
 class GestureEngine:
     def __init__(self, cfg, screen=(1920, 1080)):
         self.cfg, self.h = cfg, cfg["hand"]
-        self.tracker = HandTracker(cfg["handedness"])
+        self.tracker = HandTracker(cfg["handedness"], cfg["hand"].get("spawn_frames", 5))
+        self.face_box, self.face_t = None, -1e9
+        self.rejected = []
         self.states = {"right": HandState(self.h), "left": HandState(self.h)}
         self.last_seen = {"right": -1e9, "left": -1e9}
         self.pointer = PointerHand(cfg)
@@ -301,9 +303,33 @@ class GestureEngine:
             return dxr * dxl > 0 and abs(dxr) >= 0.5 * abs(dxl)
         return veto
 
-    def update(self, obs, now):
+    def _face_veto(self, obs, now, face_box):
+        """Drop phantom hands on the face: palm centre inside the face box shrunk to ~70%, hand small
+        next to the face (a real hand held up is big), or low handedness confidence inside the box.
+        Keeps the last box face_hold seconds. Returns (kept, rejected obs)."""
+        h = self.h
+        if face_box is not None:
+            self.face_box, self.face_t = face_box, now
+        if self.face_box is None or now - self.face_t > h.get("face_hold", 0.5):
+            return list(obs), []
+        x0, y0, x1, y1 = self.face_box
+        cx, cy, sx, sy = (x0 + x1) / 2, (y0 + y1) / 2, 0.35 * (x1 - x0), 0.35 * (y1 - y0)
+        face_h = (y1 - y0) / self.aspect                  # in frame widths, like palm_scale
+        kept, bad = [], []
+        for o in obs:
+            ax, ay = palm_anchor(o.lms)
+            inside = abs(ax - cx) <= sx and abs(ay - cy) <= sy
+            small = palm_scale(iso(o.lms, self.aspect)) < h.get("face_palm_ratio", 0.4) * face_h
+            if inside and (small or o.conf < h.get("face_min_conf", 0.6)):
+                bad.append(o)
+            else:
+                kept.append(o)
+        return kept, bad
+
+    def update(self, obs, now, face_box=None):
         cfg, h = self.cfg, self.h
         ev = []
+        obs, self.rejected = self._face_veto(obs, now, face_box)
         tracked = self.tracker.update(obs, now, swap=bool(cfg.get("swap_hands")))
         by = {t.role: t for t in tracked}
         self.debug = []

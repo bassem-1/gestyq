@@ -28,6 +28,7 @@ class FaceObs:
     top: tuple           # landmark 10
     chin: tuple          # landmark 152
     matrix: Optional[list] = None   # 4x4 facial transformation matrix
+    box: Optional[tuple] = None     # (x0, y0, x1, y1) normalised bounding box of all face landmarks
 
 
 def raw_proxies(f):
