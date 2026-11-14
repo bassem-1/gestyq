@@ -8,14 +8,20 @@ click, drag and scroll; head turns switch apps. v0.3.0 (successor to handcontrol
 ```
 conda activate vision        # python 3.11
 pip install -r requirements.txt
-./run.sh                     # models download on first start
+scripts/bundle.sh            # builds and installs /Applications/gestyq.app, then open it
 ```
+
+the app is a small launcher that runs `app.py` from this folder, so code edits take effect on the next
+launch without rebuilding. rebuild only if you move the folder or change the python env. logs go to
+`~/Library/Logs/gestyq.log`. `./run.sh` still works for quick runs from a terminal, but then macOS
+attributes permissions to the terminal instead of gestyq.
 
 ## permissions
 
 - camera: asked on launch.
 - accessibility: needed to move and click. the popover shows a banner with `grant access` until it is on.
-  add your terminal (or python) under system settings > privacy & security > accessibility.
+  turn on `gestyq` under system settings > privacy & security > accessibility (run it from
+  /Applications/gestyq.app; it appears in the list after you click `grant access` once).
 
 the app starts off. click the desktop gadget (or the switch in the popover) to turn it on. off releases
 any held mouse button and the camera.

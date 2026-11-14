@@ -57,6 +57,9 @@ def test_login_plist(tmp_path):
     assert d["Label"] == "com.gestyq.app" and d["ProgramArguments"][-1] == "/opt/gestyq/run.sh"
     login.set_enabled(False, "/opt/gestyq", p)
     assert not login.is_enabled(p)
+    login.set_enabled(True, "/opt/gestyq", p, app="/Applications/gestyq.app")
+    d = plistlib.load(open(p, "rb"))
+    assert d["ProgramArguments"] == ["/usr/bin/open", "-a", "/Applications/gestyq.app"]
 
 
 def test_state_starts_off_and_counts_pulses():

@@ -1,25 +1,38 @@
-"""Menu bar item: custom-drawn 18x18 template glyph (finger bars) + NSPopover."""
+"""Menu bar item: custom-drawn 18x18 template glyph (open hand) + NSPopover."""
 import objc
-from AppKit import (NSImage, NSMakeRect, NSMinYEdge, NSObject, NSPopover, NSPopoverBehaviorTransient,
-                    NSStatusBar, NSViewController, NSBezierPath, NSColor, NSApplication)
+from AppKit import (NSAffineTransform, NSApplication, NSBezierPath, NSColor, NSImage, NSMakeRect, NSMinYEdge,
+                    NSObject, NSPopover, NSPopoverBehaviorTransient, NSStatusBar, NSViewController)
 
 from . import theme as T
 from .popover import PopoverContent
 
-HEIGHTS = (8, 12, 10, 6)
-BAR_W, BAR_GAP = 2, 2
+# An open hand: palm, four fingers, thumb. One path so the off-state alpha doesn't double up where
+# shapes overlap. Deliberately unlike haptyq's floating bars.
+FINGERS = ((4.6, 14.2), (6.9, 16.4), (9.2, 16.0), (11.5, 13.8))     # (left x, top y)
+FINGER_W = 1.9
+
+
+def hand_path():
+    path = NSBezierPath.bezierPath()
+    path.appendBezierPath_(NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        NSMakeRect(4.6, 1.5, 8.8, 8.0), 3.2, 3.2))                                  # palm
+    for x, top in FINGERS:
+        path.appendBezierPath_(NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+            NSMakeRect(x, 7.0, FINGER_W, top - 7.0), FINGER_W / 2, FINGER_W / 2))
+    thumb = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(-1.0, 0.0, 2.0, 6.4), 1.0, 1.0)
+    t = NSAffineTransform.transform()
+    t.translateXBy_yBy_(5.8, 3.4)
+    t.rotateByDegrees_(42)
+    thumb.transformUsingAffineTransform_(t)
+    path.appendBezierPath_(thumb)
+    return path
 
 
 def icon(enabled):
-    """Template image: four vertical rounded bars (fingers), 35% alpha when off."""
+    """18x18 template image (macOS tints it); 35% alpha when off."""
     def draw(rect):
-        total = BAR_W * len(HEIGHTS) + BAR_GAP * (len(HEIGHTS) - 1)
-        x = (rect.size.width - total) / 2
         NSColor.blackColor().colorWithAlphaComponent_(1.0 if enabled else 0.35).setFill()
-        for h in HEIGHTS:
-            NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                NSMakeRect(x, (rect.size.height - h) / 2, BAR_W, h), BAR_W / 2, BAR_W / 2).fill()
-            x += BAR_W + BAR_GAP
+        hand_path().fill()
         return True
 
     img = NSImage.imageWithSize_flipped_drawingHandler_((18, 18), False, draw)

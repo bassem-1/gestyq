@@ -20,6 +20,7 @@ from ui.menubar import MenuBar
 from vision import VisionThread, list_cameras, pick_camera
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+APP = os.environ.get("GESTYQ_APP")          # set by the gestyq.app launcher
 
 
 def request_camera_access():
@@ -36,6 +37,8 @@ class Model:
     def __init__(self):
         self.cfg = config.load()
         self.cfg["launch_at_login"] = login.is_enabled()
+        if self.cfg["launch_at_login"] and APP:
+            login.set_enabled(True, HERE, app=APP)      # repoint an older run.sh login item at the app
         self.state = SharedState()
         self.actions = actions_mod.Actions(self.cfg, self.state)
         self.vision = VisionThread(self.state, self.cfg, self.actions)
@@ -50,7 +53,7 @@ class Model:
         if key == "camera_name":
             self.vision.reload_camera()
         elif key == "launch_at_login":
-            login.set_enabled(bool(value), HERE)
+            login.set_enabled(bool(value), HERE, app=APP)
         self.on_change()
 
     def set_enabled(self, on):

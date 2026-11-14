@@ -5,3 +5,4 @@ __pycache__/
 # mediapipe models, downloaded on first start
 *.task
 *.task.part
+dist/
