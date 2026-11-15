@@ -208,7 +208,7 @@ def test_v6_migration_to_relative_pointer_flicks_and_the_new_zoom(tmp_path):
         "swipe_dist": 1.15, "swipe_min": 0.04, "swipe_time": 0.5, "swipe_cooldown": 0.7, "swipe_grace": 0.3,
         "far_face_frac": 0.16, "near_face_frac": 0.20, "buffer_window": 0.3, "pinch_on": 0.2}}))
     c, d = config.load(str(p)), config.DEFAULTS
-    assert config.CONFIG_VERSION == 7 and c["config_version"] == 7
+    assert c["config_version"] == config.CONFIG_VERSION
     assert c["pointer_mode"] == "relative" and c["hot_corners"] is True and c["pointer_speed"] == 3
     h = c["hand"]
     assert not [k for k in h if k.startswith("swipe_")]                  # the open-palm swipe is gone
@@ -259,3 +259,13 @@ def test_corner_guard_math():
     two = [(0.0, 0.0, 1680.0, 1050.0), (1680.0, -569.0, 1920.0, 1080.0)]       # the second display's corners too
     assert guard_corners((3599.0, -569.0), two) == (3595.0, -565.0)
     assert guard_corners((1680.0, 0.0), two) == (1680.0, 0.0)                  # the seam between displays is no corner of its own
+
+
+def test_palms_together_old_default_becomes_minimize(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"config_version": 7, "bindings": {"palms_together": "tile_center",
+                                                               "palms_apart": "tile_fill"}}))
+    b = config.load(str(p))["bindings"]
+    assert b["palms_together"] == "minimize" and b["palms_apart"] == "tile_fill"
+    p.write_text(json.dumps({"config_version": 7, "bindings": {"palms_together": "launchpad"}}))
+    assert config.load(str(p))["bindings"]["palms_together"] == "launchpad"      # a custom choice survives

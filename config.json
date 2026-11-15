@@ -1,5 +1,5 @@
 {
-  "config_version": 7,
+  "config_version": 8,
   "pointer_speed": 2,
   "pointer_mode": "relative",
   "hot_corners": true,
@@ -145,7 +145,7 @@
     "palms_left": "tile_left",
     "palms_right": "tile_right",
     "palms_apart": "tile_fill",
-    "palms_together": "tile_center",
+    "palms_together": "minimize",
     "head_right": "next_app",
     "head_left": "prev_app",
     "head_up": "display_sleep",

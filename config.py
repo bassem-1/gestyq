@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "config.json")          # shipped defaults, never written by the app
 USER_PATH = os.path.expanduser("~/Library/Application Support/gestyq/config.json")
 VERSION = "0.3.0"
-CONFIG_VERSION = 7
+CONFIG_VERSION = 8
 
 
 def user_path():
@@ -183,7 +183,8 @@ LEGACY_DEFAULTS = {"hand": {"ext_deg": 160.0, "curl_deg": 110.0, "vote_frames": 
                             "pinch_off": 0.40, "scroll_gain": 1800, "scroll_deadzone": 0.002,
                             "tile_move": 0.15, "tile_gap": 0.15, "min_detection_conf": 0.6, "min_presence_conf": 0.6,
                             "far_face_frac": 0.16, "near_face_frac": 0.20, "buffer_window": 0.3},
-                   "camera": {"width": 1280, "height": 720}}
+                   "camera": {"width": 1280, "height": 720},
+                   "bindings": {"palms_together": "tile_center"}}      # v8: palms together = minimize
 
 # keys that no longer exist (the open-palm swipe became the flick)
 OBSOLETE = {"hand": ("swipe_dist", "swipe_min", "swipe_time", "swipe_cooldown", "swipe_grace")}

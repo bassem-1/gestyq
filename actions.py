@@ -22,6 +22,7 @@ from gestures import tile_rect
 
 # virtual key codes
 K_TAB, K_LEFT, K_RIGHT, K_DOWN, K_UP, K_F11, K_3 = 48, 123, 124, 125, 126, 103, 20
+K_M, K_F = 46, 3
 K_CMD, K_SHIFT, K_OPT, K_CTRL = 55, 56, 58, 59
 ARROWS = (K_LEFT, K_RIGHT, K_DOWN, K_UP)
 FN_FLAG = Quartz.kCGEventFlagMaskSecondaryFn
@@ -374,6 +375,10 @@ end tell''')
             self.media_key(NX_SOUND_UP)
         elif action == "volume_down":
             self.media_key(NX_SOUND_DOWN)
+        elif action == "minimize":
+            self.key(K_M, MODS["command"])                          # front window to the dock
+        elif action == "full_screen":
+            self.key(K_F, MODS["command"] | MODS["control"])        # toggle the front window's full screen
         elif action == "screenshot":
             self.key(K_3, MODS["command"] | MODS["shift"])        # full screen, the system's own save location
         elif action == "display_sleep":

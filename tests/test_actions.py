@@ -313,3 +313,15 @@ def test_quick_successive_chords_are_never_dropped_or_overlapped(monkeypatch):
         time.sleep(0.01)
     ctrl = MODS["control"]
     assert played == [(124, ctrl), (123, ctrl)] * 3 and worst[0] == 1
+
+
+def test_minimize_and_full_screen_send_their_shortcuts(monkeypatch):
+    import actions as A
+    import config
+    from state import SharedState
+    act = A.Actions(config.load(), SharedState())
+    sent = []
+    monkeypatch.setattr(act, "key", lambda code, flags=0: sent.append((code, flags)))
+    act.run("minimize")
+    act.run("full_screen")
+    assert sent == [(A.K_M, A.MODS["command"]), (A.K_F, A.MODS["command"] | A.MODS["control"])]

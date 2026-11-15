@@ -92,7 +92,7 @@ any held mouse button and the camera.
 | left | thumb + index pinch | right click |
 | left | index + middle up, move up/down | scroll |
 | either | flick the hand sideways, any pose, like waving a fly away (a burst above 10 palm sizes / s, 0.8+ palm sizes within 0.25 s; the return stroke is ignored) | next space (your left) / previous space (your right) |
-| both | open palms: move together left/right, spread, bring together | tile window left/right, fill, centre |
+| both | open palms: move together left/right, spread apart, bring together | tile window left/right, maximize, minimize |
 | head | turn right and back / left and back | next app (cmd+tab) / previous app |
 | head | tilt up and hold 0.6 s | display sleep |
 
