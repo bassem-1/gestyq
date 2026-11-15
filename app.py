@@ -13,6 +13,7 @@ from AppKit import (NSImage, NSApplication, NSApplicationActivationPolicyAccesso
 from Foundation import NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
 import actions as actions_mod
+import afterquit
 import bindings
 import cameras
 import config
@@ -28,7 +29,7 @@ from vision import VisionThread
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.environ.get("GESTYQ_APP")          # set by the gestyq.app launcher
-BACKGROUND = "--background" in sys.argv    # the login item: stay in the menu bar, no window
+ON, BACKGROUND = afterquit.parse_argv(sys.argv)   # --on: start enabled (the gadget helper's click); --background: no window
 
 
 def request_camera_access():
@@ -47,6 +48,8 @@ class Model:
         self.cfg["launch_at_login"] = login.is_enabled()
         if self.cfg["launch_at_login"] and APP:
             login.set_enabled(True, HERE, app=APP)      # repoint an older run.sh login item at the app
+        if APP:
+            afterquit.sync(self.cfg["gadget_after_quit"], HERE, APP)       # (re)write the helper's LaunchAgent
         self.state = SharedState()
         self.actions = actions_mod.Actions(self.cfg, self.state)
         self.vision = VisionThread(self.state, self.cfg, self.actions)
@@ -68,6 +71,8 @@ class Model:
         self.saver.poke()
         if key == "launch_at_login":
             login.set_enabled(bool(value), HERE, app=APP)
+        if key == "gadget_after_quit" and APP:
+            afterquit.sync(bool(value), HERE, APP)
         self.on_change()
 
     # -- window / bindings
@@ -142,6 +147,8 @@ class Model:
         self.actions.release_all()
         self.saver.flush()
         config.save(self.cfg)
+        if APP:
+            afterquit.on_quit(self.cfg["gadget_after_quit"])       # the helper takes over the desktop gadget
         NSApplication.sharedApplication().terminate_(None)
 
 
@@ -179,6 +186,8 @@ class Delegate(NSObject):
         signal.signal(signal.SIGINT, lambda *a: m.quit())
         atexit.register(m.actions.release_all)
         self.publish_screen()
+        if ON:
+            m.set_enabled(True)
         if not BACKGROUND:
             self.show_window()
 

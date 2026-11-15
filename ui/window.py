@@ -19,6 +19,7 @@ from .widgets import Flipped, Switch, TextButton, text_width
 WIN_W, WIN_H = 960, 640
 TOP = 44
 HOT_X = 404                      # "hot corners" label in the settings strip; its switch and hint follow
+AFTER_X = 330                    # "gadget after quit" label in the title strip, its switch follows
 WRITE_X = 706                    # "air writing" switch, then the case buttons
 FOOT = 40                      # settings strip along the bottom
 BODY_H = WIN_H - TOP - 1 - FOOT
@@ -34,6 +35,10 @@ class Root(Flipped):
         self.master = Switch.alloc().initWithOn_callback_(False, model.set_enabled)
         self.master.setFrameOrigin_((WIN_W - T.PAD - Switch.W, 13))
         self.addSubview_(self.master)
+        # the gadget stays on the desktop (a tiny helper) after gestyq quits; popover is full (hick), so it lives here
+        self.after = Switch.alloc().initWithOn_callback_(True, lambda on: model.set("gadget_after_quit", bool(on)))
+        self.after.setFrameOrigin_((AFTER_X + 132, 13))
+        self.addSubview_(self.after)
         self.live = LiveView.alloc().initWithModel_(model)
         self.live.setFrameOrigin_((0, TOP + 1))
         self.addSubview_(self.live)
@@ -80,6 +85,7 @@ class Root(Flipped):
                 b.setNeedsDisplay_(True)
             self.setNeedsDisplayInRect_(NSMakeRect(0, WIN_H - FOOT, WIN_W, FOOT))
         self.corners.set_on(bool(cfg.get("hot_corners", True)))
+        self.after.set_on(bool(cfg.get("gadget_after_quit", True)))
         self.writing.set_on(bool(cfg["write"]["enabled"]))
         case = "lower" if cfg.get("writing_case") == "lower" else "upper"
         if case != self.case_now:
@@ -99,6 +105,7 @@ class Root(Flipped):
         T.black().setFill()
         NSBezierPath.fillRect_(self.bounds())
         put("gestyq", 84, 14, T.SIZE_TITLE, T.fg(), medium=True)
+        put("gadget after quit", AFTER_X, 15, T.SIZE_SMALL, T.fg2())
         put(self.status, WIN_W - T.PAD - Switch.W - 12, 15, T.SIZE_SMALL, T.fg2(), right=True)
         T.line().setFill()
         NSBezierPath.fillRect_(NSMakeRect(0, TOP, WIN_W, 1))

@@ -1,4 +1,5 @@
-"""Desktop gadget: 140x140 borderless non-activating panel. Click toggles on/off, drag moves it."""
+"""Desktop gadget: 140x140 borderless non-activating panel. Click toggles on/off, drag moves it. Shared by the app and
+by gadget_helper.py (which subclasses GadgetController and overrides click / menu entries); imports no heavy modules."""
 import math
 
 import objc
@@ -115,7 +116,7 @@ class GadgetController:
         self.view = GadgetView.alloc().initWithFrame_(NSMakeRect(0, 0, SIZE, SIZE))
         p.setContentView_(self.view)
         p.down, p.moved = None, False
-        p.on_click = lambda: self.model.set_enabled(not self.model.state.get()["enabled"])
+        p.on_click = self.click
         p.on_moved = self._moved
         p.menu_builder = self._menu
         o = cfg.get("gadget_origin") or self._default_origin()
@@ -134,6 +135,19 @@ class GadgetController:
         p.setLevel_(NSFloatingWindowLevel if cfg["gadget_floats"]
                     else int(CGWindowLevelForKey(kCGDesktopIconWindowLevelKey)) + 1)
         p.orderFrontRegardless()
+
+    # -- what differs between the app's gadget and the helper's
+    def click(self):
+        self.model.set_enabled(not self.model.state.get()["enabled"])
+
+    def entries(self):
+        """[(title, checked, fn)] for the right-click menu."""
+        cfg = self.model.cfg
+        return [("open gestyq", False, self.model.open_window),
+                ("hide gadget", False, lambda: self.model.set("desktop_gadget", False)),
+                ("float above windows", cfg["gadget_floats"],
+                 lambda: self.model.set("gadget_floats", not cfg["gadget_floats"])),
+                ("quit", False, self.model.quit)]
 
     def update(self, on, caption, pulsed):
         if self.panel is None:
@@ -173,12 +187,7 @@ class GadgetController:
     def _menu(self):
         m = NSMenu.alloc().init()
         m.setAppearance_(T.dark_appearance())
-        cfg = self.model.cfg
-        entries = [("open gestyq", False, self.model.open_window),
-                   ("hide gadget", False, lambda: self.model.set("desktop_gadget", False)),
-                   ("float above windows", cfg["gadget_floats"],
-                    lambda: self.model.set("gadget_floats", not cfg["gadget_floats"])),
-                   ("quit", False, self.model.quit)]
+        entries = self.entries()
         self.handler.handlers = {}
         for i, (title, checked, fn) in enumerate(entries):
             it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, "fire:", "")

@@ -24,6 +24,18 @@ opening gestyq shows its window (also: `open gestyq` in the popover, the gadget'
 launching the app again while it runs). closing it returns to the menu bar; gestyq keeps running. the
 login item starts with `--background`, so no window appears at login.
 
+## the gadget after quit
+
+the desktop gadget stays on screen when you quit gestyq. a tiny helper (`gadget_helper.py`, AppKit only: no camera,
+no hand tracking, no accessibility needed, ~0% cpu) runs as its own LaunchAgent
+(`~/Library/LaunchAgents/com.gestyq.gadget.plist`, log `~/Library/Logs/gestyq-gadget.log`) and shows the same gadget,
+in the same spot, as "off / click to start" whenever gestyq is not running. click it to launch gestyq switched on
+(`gestyq.app --on --background`, no window); the helper hides itself while gestyq runs. right-click: `start gestyq`,
+`hide gadget` (turns the setting off and removes the LaunchAgent), `quit gadget` (until gestyq next quits or you log in).
+the switch is `gadget after quit` in the window's title strip (config key `gadget_after_quit`, default on); turning
+it off removes the agent. if the desktop gadget itself is off, the helper shows nothing. gestyq writes the plist at
+launch and starts the agent as it quits.
+
 - left, live view: the mirrored camera, dimmed, with each hand's 21 landmarks (pointer hand full red,
   command hand 55%), role tag, and under it each hand's pose, finger states (T I M R P, filled =
   extended), pinch ratio against the `pinch_on` / `pinch_off` ticks, handedness vote, head yaw/pitch

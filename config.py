@@ -46,6 +46,7 @@ DEFAULTS = {
     "desktop_gadget": True,
     "gadget_floats": True,
     "launch_at_login": False,
+    "gadget_after_quit": True,    # a tiny helper keeps the gadget on the desktop while gestyq is not running
     "gadget_origin": None,        # [x, y] in Cocoa screen coords
     "flip_gaze_x": False,
     # asks for width x height (falls back to 1280x720); detection sees `process_width` of it, or a full-resolution

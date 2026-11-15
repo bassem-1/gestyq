@@ -269,3 +269,48 @@ def test_palms_together_old_default_becomes_minimize(tmp_path):
     assert b["palms_together"] == "minimize" and b["palms_apart"] == "tile_fill"
     p.write_text(json.dumps({"config_version": 7, "bindings": {"palms_together": "launchpad"}}))
     assert config.load(str(p))["bindings"]["palms_together"] == "launchpad"      # a custom choice survives
+
+
+def test_gadget_agent_plist(tmp_path):
+    import plistlib
+    import afterquit
+    p = str(tmp_path / "LaunchAgents" / "g.plist")
+    assert afterquit.write_plist(True, "/opt/gestyq", "/py/bin/python3", "/Applications/gestyq.app", p) is True
+    d = plistlib.load(open(p, "rb"))
+    assert d["Label"] == "com.gestyq.gadget" and d["RunAtLoad"] is True and d["KeepAlive"] == {"SuccessfulExit": False}
+    assert d["ProgramArguments"] == ["/py/bin/python3", "/opt/gestyq/gadget_helper.py", "--app", "/Applications/gestyq.app"]
+    assert d["WorkingDirectory"] == "/opt/gestyq" and d["StandardErrorPath"].endswith("gestyq-gadget.log")
+    assert afterquit.write_plist(True, "/opt/gestyq", "/py/bin/python3", "/Applications/gestyq.app", p) is False
+    assert afterquit.is_installed(p)
+    assert afterquit.write_plist(False, "/opt/gestyq", "", path=p) is True and not afterquit.is_installed(p)
+
+
+def test_gadget_agent_sync_and_quit(tmp_path):
+    import afterquit
+    p = str(tmp_path / "g.plist")
+    calls = []
+
+    def run(args):
+        calls.append(args[0])
+        return 1 if args[0] == "print" else 0          # never loaded
+    afterquit.sync(True, "/opt/g", "/Applications/gestyq.app", p, run, python="/py")
+    assert afterquit.is_installed(p) and calls == []    # enabling never starts it while gestyq runs
+    assert afterquit.on_quit(True, p, run) is True
+    assert calls == ["print", "bootstrap", "kickstart"]
+    assert afterquit.on_quit(False, p, run) is False
+    calls.clear()
+    afterquit.sync(False, "/opt/g", path=p, run=run)
+    assert not afterquit.is_installed(p) and calls == ["print"]      # not loaded: nothing to boot out
+    assert afterquit.on_quit(True, p, run) is False                  # no plist: nothing to start
+
+
+def test_gadget_agent_argv_and_visibility():
+    import afterquit
+    assert afterquit.parse_argv(["app.py", "--on", "--background"]) == (True, True)
+    assert afterquit.parse_argv(["app.py"]) == (False, False)
+    assert afterquit.parse_argv(["app.py", "--background"]) == (False, True)
+    assert config.DEFAULTS["gadget_after_quit"] is True
+    for running in (False, True):
+        for gadget in (False, True):
+            for after in (False, True):
+                assert afterquit.should_show(running, gadget, after) == (not running and gadget and after)
