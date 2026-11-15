@@ -154,6 +154,7 @@ class Pipeline:
         self.plan = None
         self._seen = False
         self._n = 0
+        self.t_face = 0.0                # s the last face pass took (perf trace)
 
     def reset(self):
         self.planner.reset()
@@ -191,12 +192,42 @@ class Pipeline:
         self.planner.observe_hands([o.lms[0][:2] for o in hands], now)
         self._seen = bool(hands)
         face, bs = None, None
+        self.t_face = 0.0
         if ts_face is not None:
+            t0 = time.perf_counter()
             face, bs = self.det.face(img, ts_face)
+            self.t_face = time.perf_counter() - t0
             face = map_face(face, rect)
             if face is not None:
                 self.planner.observe_face(face_geom(face), now)
         return hands, face, bs, plan
+
+
+class Perf:
+    """Rate-limited timing log: one `perf-trace` line every `every` s with means in ms (face over face frames
+    only; latency = frame reached Python -> events executed, i.e. everything we control)."""
+
+    def __init__(self, every=5.0, out=print):
+        self.every, self.out = every, out
+        self.t0, self.n, self.sum, self.nf = None, 0, {}, 0
+
+    def add(self, now, capture, detect, face, engine, actions, latency):
+        if self.t0 is None:
+            self.t0 = now
+        self.n += 1
+        for k, v in (("capture", capture), ("detect", detect), ("engine", engine), ("actions", actions),
+                     ("latency", latency)):
+            self.sum[k] = self.sum.get(k, 0.0) + v
+        if face is not None:
+            self.sum["face"] = self.sum.get("face", 0.0) + face
+            self.nf += 1
+        if now - self.t0 >= self.every:
+            m = lambda k, n: 1000 * self.sum.get(k, 0.0) / max(n, 1)
+            self.out(f"perf-trace fps={self.n / (now - self.t0):.1f} capture={m('capture', self.n):.1f}ms "
+                     f"detect={m('detect', self.n):.1f}ms face={m('face', self.nf):.1f}ms "
+                     f"engine={m('engine', self.n):.1f}ms actions={m('actions', self.n):.1f}ms "
+                     f"latency={m('latency', self.n):.1f}ms")
+            self.t0, self.n, self.sum, self.nf = now, 0, {}, 0
 
 
 class VisionThread(threading.Thread):
@@ -220,6 +251,7 @@ class VisionThread(threading.Thread):
         self.cam = Camera(cfg)
         self.det = Detectors(cfg)
         self.pipe = Pipeline(cfg, self.det)
+        self.perf = Perf(out=lambda t: print(t, flush=True))
         self.reopen = False
         self.t0 = time.monotonic()
         self.last_ts = -1
@@ -405,7 +437,9 @@ class VisionThread(threading.Thread):
                     fails = 0
                     self.state.update(camera="ok", camera_uid=self.cam.device.uid, camera_name=self.cam.device.name,
                                       camera_note=self.cam.note)
+                t_cap = time.perf_counter()
                 ok, frame = self.cam.read()
+                t_cap = time.perf_counter() - t_cap
                 if not ok:
                     fails += 1
                     if fails >= 20:                 # lid closed / camera taken by another app
@@ -427,7 +461,9 @@ class VisionThread(threading.Thread):
                 if frame_i % every == 0:
                     self.last_ts_f = max(self.last_ts_f + 1, ts)
                     ts_f = self.last_ts_f
+                t_det = time.perf_counter()
                 hands, face, bs, plan = self.pipe.run(frame, now, ts, ts_f)
+                t_det = time.perf_counter() - t_det
                 self.engine.aspect = w / h
                 self.engine.screen = self.actions.bounds()[2:]
                 self.engine.rects = self.actions.desktop.rects()
@@ -439,7 +475,9 @@ class VisionThread(threading.Thread):
                     self.recorder.write(now, w / h, hands)      # full-frame normalised, whatever was cropped
                 wr = self.write_evt.is_set()
                 self.engine.write_active, self.engine.write_shown_at = wr, self.write_shown if wr else None
+                t_eng = time.perf_counter()
                 evs = self.engine.update(hands, now, face.box if face else None)
+                t_eng = time.perf_counter() - t_eng
                 if not wr or not self.write_evt.is_set():       # nothing is typed once the canvas left
                     evs = [e for e in evs if e.kind != "write"]
                 n_ink = self.engine.ink["n"] if wr and self.engine.ink else None
@@ -464,7 +502,12 @@ class VisionThread(threading.Thread):
                     self.glog.add_events(evs, now)
                 self._wake(now, hands, evs)
                 self._note_sleep_request(evs, now)
+                t_act = time.perf_counter()
                 self._emit(evs)
+                t_act = time.perf_counter() - t_act
+                tf = getattr(self.pipe, "t_face", 0.0)
+                self.perf.add(time.monotonic(), t_cap, t_det - tf, tf if ts_f is not None else None,
+                              t_eng, t_act, time.monotonic() - getattr(self.cam.cap, "stamp", now))
                 self.state.update(camera="ok", caption=self.engine.caption(now), hands=len(self.engine.labels))
                 if win:
                     self._publish(now, frame, w / h, head_lvl, plan)

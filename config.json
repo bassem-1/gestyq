@@ -1,7 +1,8 @@
 {
-  "config_version": 8,
+  "config_version": 9,
   "pointer_speed": 2,
   "pointer_mode": "relative",
+  "writing_case": "upper",
   "hot_corners": true,
   "head_level": 2,
   "tiling": true,
@@ -27,8 +28,8 @@
   "hand": {
     "frame_margin_x": 0.15,
     "frame_margin_y": 0.15,
-    "min_cutoff": 1.0,
-    "beta": 0.007,
+    "min_cutoff": 1.2,
+    "beta": 0.025,
     "deadzone": 1.5,
     "ext_deg": 155.0,
     "soft_deg": 135.0,
@@ -81,6 +82,14 @@
     "face_hold": 0.5,
     "face_palm_ratio": 0.4,
     "face_min_conf": 0.6,
+    "rest_filter": true,
+    "rest_scale_x": 1.4,
+    "rest_up": 0.5,
+    "rest_down": 0.3,
+    "rest_still_time": 0.3,
+    "rest_speed": 0.5,
+    "rest_overlap": 0.5,
+    "rest_keep": 3.0,
     "min_detection_conf": 0.7,
     "min_presence_conf": 0.7,
     "min_tracking_conf": 0.5,
@@ -153,8 +162,7 @@
     "max_user": 5,
     "min_cutoff": 2.0,
     "beta": 0.02,
-    "ink_scale": 48,
-    "charset": "lower"
+    "ink_scale": 48
   },
   "bindings": {
     "pinch": "left_click",

@@ -48,17 +48,17 @@ def flip(strokes):
 
 
 def accuracy(rec, level, p_rev=0.0, trials=40, seed=1, chars=None):
-    """-> (fraction right, [(want, got)] mistakes) over `trials` noisy copies of every letter (a-z by default)."""
+    """-> (fraction right, [(want, got)] mistakes) over `trials` noisy copies of every letter (A-Z by default)."""
     rng = random.Random(seed)
     ok = n = 0
     bad = []
-    for ch in chars or "abcdefghijklmnopqrstuvwxyz":
+    for ch in chars or "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
         for _ in range(trials):
             variants = letters.LETTERS[ch]
             ink = flip(synth(rng.choice(variants), rng, level, p_rev))
             got = rec.recognize(ink)
             n += 1
-            if got and got[0].char == ch:
+            if got and got[0].char.upper() == ch:
                 ok += 1
             else:
                 bad.append((ch, got[0].char if got else None))

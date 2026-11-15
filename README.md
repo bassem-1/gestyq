@@ -118,12 +118,17 @@ caret stays where it was. click anywhere else and it goes away. password fields 
 - pointing, pinch and flicks work as before whenever no text field is focused. a pinch right after writing is not a click.
 - the switch `air writing` in the window (or `write.enabled`) turns all of it off. the `toggle_write` action can be bound.
 
-letter shapes (lowercase a-z): one stroke each, in the usual direction, except f k t x y (a second stroke, or
-retrace the line instead of lifting). `i` is a bare line, `l` is a tall line with a foot (or a cursive loop). a bare
-line cannot be told from `l` after scaling, so that is the convention. the shapes are in `letters.py`. the
-recogniser is a template matcher (`recognizer.py`); on synthetic noisy letters it reads 99.8% / 97.5% / 91% right at
-noise 0.6 / 1.0 / 1.4, but your own handwriting in the air will be worse: expect 80-90% at first. the canvas shows what
-was read; flick left to undo.
+letter shapes (**capitals A-Z**, the way block capitals are written in the air): lift the finger or retrace instead of
+lifting, both work, and the common variants are built in (A as an inverted V plus bar, left leg or right leg first; E and F
+as one snake path or a stack; K, H, X, T, Y, P, R, B, D, Q with or without a lift). `I` is a bare line, `L` is down then
+RIGHT, `J` is down then a curved hook, and enter is down then LEFT (a sharp corner). the shapes are in `letters.py`
+(the lowercase set was dropped; see git history). the recogniser is a template matcher (`recognizer.py`); on synthetic
+noisy capitals it reads 99.7% / 97% / 87% right at noise 0.6 / 1.0 / 1.4 (90% at 1.0 when a quarter of the strokes are
+drawn backwards), but your own handwriting in the air will be worse: expect 80-90% at first. the commonest mix-ups are
+U/V, N/W, K/R, D/P, S/F. the canvas shows what was read, in the case that is typed; flick left to undo.
+
+**case**: letters are typed as capitals by default. the `caps` / `lower` buttons next to `air writing` in the window (or
+`writing_case`: `"upper"` / `"lower"` in your settings file) choose the case; the shapes drawn are the same.
 
 needs accessibility (to read which field is focused). `python3 tools/ax_probe.py` prints what the focused element
 reports; `python3 tools/write_replay.py <recording.jsonl>` runs a recording (window `record` button) through the

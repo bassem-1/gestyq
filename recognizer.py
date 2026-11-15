@@ -21,7 +21,7 @@ from ink import normalize, resample
 Candidate = namedtuple("Candidate", "char dist score")      # dist: lower is better; score = max(0, 1 - dist / reject)
 
 N = 32
-DEFAULTS = {"reject": 0.28, "margin": 0.02, "user_weight": 0.9, "max_user": 5, "charset": "lower"}
+DEFAULTS = {"reject": 0.28, "margin": 0.02, "user_weight": 0.9, "max_user": 5}
 ENTER_MAX = 0.14
 
 
@@ -112,8 +112,17 @@ class TemplateRecognizer:
         w = dict(DEFAULTS)
         w.update(((cfg or {}).get("write", cfg) or {}) if cfg else {})
         self.w = w
+        self.cfg = cfg if isinstance(cfg, dict) else {}       # read live: the window changes writing_case
         self.base = builtin_templates()
         self.store = store
+
+    @staticmethod
+    def _key(ch):
+        return ch.upper()                 # templates are capitals; a user template saved as "a" counts for "A"
+
+    def _cased(self, ch):
+        """The character as it is typed: writing_case "upper" (default) or "lower"."""
+        return ch.lower() if self.cfg.get("writing_case", "upper") == "lower" else ch.upper()
 
     def recognize(self, strokes):
         pts = prep(strokes)
@@ -122,11 +131,13 @@ class TemplateRecognizer:
         best = {}
         for ch, t in self.base:
             d = dist(pts, t)
+            ch = self._key(ch)
             if d < best.get(ch, 9e9):
                 best[ch] = d
         if self.store is not None:
             for ch, t in self.store.templates():
                 d = dist(pts, t) * self.w["user_weight"]
+                ch = self._key(ch)
                 if d < best.get(ch, 9e9):
                     best[ch] = d
         ranked = sorted(best.items(), key=lambda kv: kv[1])
@@ -140,7 +151,7 @@ class TemplateRecognizer:
         if ranked and ranked[0][1] > self.w["reject"]:
             return []
         rej = self.w["reject"]
-        return [Candidate(ch, d, max(0.0, 1.0 - d / rej)) for ch, d in ranked]
+        return [Candidate(self._cased(ch), d, max(0.0, 1.0 - d / rej)) for ch, d in ranked]
 
     def unsure(self, cands):
         return len(cands) > 1 and cands[1].dist - cands[0].dist < self.w["margin"]

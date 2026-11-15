@@ -17,6 +17,7 @@ from desktop import ControlBox, RelativePointer, from_norm, margin_box, to_norm
 from events import Event
 import ink
 import recognizer
+from restface import RestFilter
 from filters import DeadZone, OneEuro, OneEuro2D, RingBuffer, clamp
 from tracking import FOUR, HandState, HandTracker, iso, median, palm_anchor, palm_scale
 
@@ -357,6 +358,8 @@ class GestureEngine:
         self.tracker = HandTracker(cfg["handedness"], cfg["hand"].get("spawn_frames", 5))
         self.face_box, self.face_t = None, -1e9
         self.rejected = []
+        self.rest = RestFilter(cfg["hand"])
+        self.resting = []                # hands ignored because they rest on the face / head (live view dims them)
         self.states = {"right": HandState(self.h), "left": HandState(self.h)}
         self.last_seen = {"right": -1e9, "left": -1e9}
         self.pointer = PointerHand(cfg)
@@ -396,6 +399,8 @@ class GestureEngine:
         self.pointer.reset()
         self.command.reset()
         self.cbox.reset()
+        self.rest.reset()
+        self.resting = []
         self.tile_hist.clear()
         for k in ("right", "left"):
             self.flicks[k].reset()
@@ -443,7 +448,10 @@ class GestureEngine:
         h = self.h
         if face_box is not None:
             self.face_box, self.face_t = face_box, now
-        if self.face_box is None or now - self.face_t > h.get("face_hold", 0.5):
+        fresh = self.face_box is not None and now - self.face_t <= h.get("face_hold", 0.5)
+        box = self.face_box if now - self.face_t <= h.get("rest_keep", 3.0) else None
+        obs, self.resting = self.rest.split(obs, now, self.aspect, box, fresh)
+        if not fresh:
             return list(obs), []
         x0, y0, x1, y1 = self.face_box
         cx, cy, sx, sy = (x0 + x1) / 2, (y0 + y1) / 2, 0.35 * (x1 - x0), 0.35 * (y1 - y0)

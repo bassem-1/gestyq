@@ -158,6 +158,8 @@ class RelativePointer:
         self.spd += 0.5 * (math.hypot(mx, my) / 100 / dt - self.spd)
         if skip:
             return self.pos
+        if len(rects) > 1:                  # the gain follows the display under the cursor, not the primary's width
+            ref_w = next((r[2] for r in rects if r[0] <= self.pos[0] < r[0] + r[2] and r[1] <= self.pos[1] < r[1] + r[3]), ref_w)
         k = self.gain(self.spd, scale) * ref_w / 100
         self.pos = clamp_to_displays((self.pos[0] + mx * k, self.pos[1] + my * k), rects)
         return self.pos

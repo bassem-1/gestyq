@@ -117,6 +117,7 @@ class AVCamera:
         self.session = self.delegate = self.queue = None
         self.cond = threading.Condition()
         self.frame, self.seq, self.last = None, 0, 0
+        self.stamp = 0.0                    # time.monotonic() the newest frame reached Python
         self.size = (0, 0)
 
     def open(self, uid, width=1920):
@@ -156,7 +157,7 @@ class AVCamera:
 
     def _push(self, bgr):
         with self.cond:
-            self.frame, self.seq = bgr, self.seq + 1
+            self.frame, self.seq, self.stamp = bgr, self.seq + 1, time.monotonic()
             self.size = (bgr.shape[1], bgr.shape[0])
             self.cond.notify_all()
 

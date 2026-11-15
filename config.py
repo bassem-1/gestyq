@@ -13,7 +13,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "config.json")          # shipped defaults, never written by the app
 USER_PATH = os.path.expanduser("~/Library/Application Support/gestyq/config.json")
 VERSION = "0.3.0"
-CONFIG_VERSION = 8
+CONFIG_VERSION = 9
 
 
 def user_path():
@@ -34,6 +34,7 @@ DEFAULTS = {
     "pointer_speed": 2,           # 0 off, 1 steady, 2 calm, 3 brisk, 4 fast
     "pointer_mode": "relative",   # relative: the hand moves the cursor like a mouse (any place in the frame);
                                   # absolute: a camera sub-rectangle maps onto the displays
+    "writing_case": "upper",      # air-writing types capitals ("upper") or lowercase ("lower")
     "hot_corners": True,          # False: gesture-driven cursor stays 4 px away from the display corners
     "head_level": 2,              # 0 off, 1 low, 2 normal, 3 high, 4 max
     "tiling": True,
@@ -56,8 +57,8 @@ DEFAULTS = {
     "hand": {
         "frame_margin_x": 0.15,   # absolute mode: camera sub-rectangle mapped to the whole screen
         "frame_margin_y": 0.15,
-        "min_cutoff": 1.0,        # One Euro on the pointer anchor, in 1/1000-screen units
-        "beta": 0.007,
+        "min_cutoff": 1.2,        # One Euro on the pointer anchor, in 1/100-palm units
+        "beta": 0.025,            # speed coefficient: smoothing lag 56 -> ~30 ms at 1 palm/s (was 1.0 / 0.007)
         "deadzone": 1.5,          # 1/1000-screen units
         "ext_deg": 155.0,         # PIP angle above which a finger is extended ...
         "soft_deg": 135.0,        # ... or above this when the tip is also far from the wrist (reach_ext)
@@ -112,6 +113,15 @@ DEFAULTS = {
         "face_hold": 0.5,         # s the last face box keeps vetoing
         "face_palm_ratio": 0.4,   # hand inside the face box and palm < this x face height = phantom
         "face_min_conf": 0.6,     # ... or handedness confidence below this
+        # hands resting on the face / head are ignored (restface.py)
+        "rest_filter": True,
+        "rest_scale_x": 1.4,      # head region: face box width x this, centred
+        "rest_up": 0.5,           # ... extended this many face heights above the box (top of the head)
+        "rest_down": 0.3,         # ... and this many below it (chin / jaw band)
+        "rest_still_time": 0.3,   # s a hand in the region must be still to count as resting
+        "rest_speed": 0.5,        # still = palm centre extent below this many palm sizes / s
+        "rest_overlap": 0.5,      # or this share of its landmarks inside the face box
+        "rest_keep": 3.0,         # s an already-ignored hand is still judged against the last face box
         "min_detection_conf": 0.7,
         "min_presence_conf": 0.7,
         "min_tracking_conf": 0.5,
@@ -172,7 +182,6 @@ DEFAULTS = {
         "min_ink": 0.5,           "min_size": 0.6,          # palm sizes: shorter / smaller ink is dropped
         "reject": 0.28,           "margin": 0.02,           "user_weight": 0.9,   "max_user": 5,
         "min_cutoff": 2.0,        "beta": 0.02,             "ink_scale": 48,      # ink_scale: points per palm size
-        "charset": "lower",
     },
     # gesture id -> action id (see bindings.py); the app window edits this
     "bindings": dict(bindings.DEFAULT_BINDINGS),
@@ -191,7 +200,7 @@ def _merge(base, over):
 
 # values the old default config shipped with and that were retuned: a saved copy of an OLD default
 # must not pin the new default (the app used to write its whole config).
-LEGACY_DEFAULTS = {"hand": {"ext_deg": 160.0, "curl_deg": 110.0, "vote_frames": 5, "pinch_on": 0.25,
+LEGACY_DEFAULTS = {"hand": {"min_cutoff": 1.0, "beta": 0.007, "ext_deg": 160.0, "curl_deg": 110.0, "vote_frames": 5, "pinch_on": 0.25,
                             "pinch_off": 0.40, "scroll_gain": 1800, "scroll_deadzone": 0.002,
                             "tile_move": 0.15, "tile_gap": 0.15, "min_detection_conf": 0.6, "min_presence_conf": 0.6,
                             "far_face_frac": 0.16, "near_face_frac": 0.20, "buffer_window": 0.3},

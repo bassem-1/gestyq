@@ -137,7 +137,7 @@ class Drive:
 def test_still_commit_fires_half_a_second_after_the_tip_stops():
     d = Drive()
     d.arm()
-    st = template_path("o")
+    st = template_path("O")
     d.draw(st)
     t_stop = d.t - 1 / FPS
     d.hold(1.0)
@@ -149,7 +149,7 @@ def test_still_commit_fires_half_a_second_after_the_tip_stops():
 def test_pause_commit_fires_0_6_s_after_pen_up():
     d = Drive()
     d.arm()
-    d.draw(template_path("n"))
+    d.draw(template_path("N"))
     d.frame(pose="open")                       # fingers open: the pen goes up
     t_up = d.t - 1 / FPS
     d.hold(1.0, pose="open")
@@ -159,7 +159,7 @@ def test_pause_commit_fires_0_6_s_after_pen_up():
 
 
 def test_second_stroke_within_the_pause_joins_the_letter_and_a_late_one_does_not():
-    x = template_path("x", variant=0)
+    x = template_path("X", variant=0)
     for gap, expect in ((0.3, 1), (0.8, 2)):
         d = Drive()
         d.arm()
@@ -175,7 +175,7 @@ def test_second_stroke_within_the_pause_joins_the_letter_and_a_late_one_does_not
 
 def test_nothing_is_inked_during_the_arm_delay_or_while_inactive():
     d = Drive()
-    st = template_path("o")[0][:8]
+    st = template_path("O")[0][:8]
     d.pos = st[0]
     d.hold(0.1, pose="point")                  # canvas just appeared: the hand coming out of the click pinch
     d.draw([st])
@@ -183,7 +183,7 @@ def test_nothing_is_inked_during_the_arm_delay_or_while_inactive():
     q = Drive()
     q.hold(0.7, pose="open", active=False)
     q.hold(0.3, pose="point", active=False)
-    q.draw(template_path("o"), active=False)
+    q.draw(template_path("O"), active=False)
     q.hold(1.0, active=False)
     assert not q.inked() and not q.commits and not any(o.pen for _, o in q.out)
 
@@ -191,7 +191,7 @@ def test_nothing_is_inked_during_the_arm_delay_or_while_inactive():
 def test_deactivation_drops_pending_ink_and_emits_nothing():
     d = Drive()
     d.arm()
-    d.draw(template_path("o"))
+    d.draw(template_path("O"))
     assert d.w.busy
     d.frame(active=False)
     assert not d.w.busy and not d.out[-1][1].pen
@@ -202,7 +202,7 @@ def test_deactivation_drops_pending_ink_and_emits_nothing():
 def test_a_short_other_blip_keeps_the_stroke_but_open_ends_it():
     d = Drive()
     d.arm()
-    st = template_path("o")[0]
+    st = template_path("O")[0]
     for p in st[:len(st) // 2]:
         d.frame(p)
     for p in st[len(st) // 2:len(st) // 2 + 3]:          # 0.1 s of "other"
@@ -223,7 +223,7 @@ def test_a_short_other_blip_keeps_the_stroke_but_open_ends_it():
 def test_a_parked_pen_ignores_jitter_and_a_real_move_starts_a_new_letter():
     d = Drive()
     d.arm()
-    d.draw(template_path("o"))
+    d.draw(template_path("O"))
     d.hold(0.8)                                          # still-commit, pen stays down (parked)
     assert len(d.commits) == 1
     rng = random.Random(3)
@@ -238,7 +238,7 @@ def test_a_parked_pen_ignores_jitter_and_a_real_move_starts_a_new_letter():
 
 def test_changing_palm_size_mid_letter_does_not_distort_the_letter():
     import recognizer
-    base = template_path("n", size=1.5)[0]
+    base = template_path("N", size=1.5)[0]
     ref = None
     for grow in (False, True):
         d = Drive()
@@ -266,7 +266,7 @@ def test_too_short_ink_is_discarded_without_a_commit():
 def test_pen_needs_the_point_pose_and_a_raw_pinch_lifts_it():
     d = Drive()
     d.arm()
-    st = template_path("o")[0]
+    st = template_path("O")[0]
     for p in st[:6]:
         d.frame(p)
     assert d.out[-1][1].pen
@@ -277,7 +277,7 @@ def test_pen_needs_the_point_pose_and_a_raw_pinch_lifts_it():
 def test_still_inside_a_letter_resets_when_the_tip_moves_on():
     d = Drive()
     d.arm()
-    st = template_path("o")[0]
+    st = template_path("O")[0]
     for p in st[:10]:
         d.frame(p)
     d.hold(0.3)                                          # a short hesitation is not the end

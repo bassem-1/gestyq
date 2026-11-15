@@ -413,7 +413,7 @@ def _labels_with_face(scale, face=FACE, conf=0.9):
     e = GestureEngine(cfg(), screen=(1920, 1080))
     for i in range(8):
         e.update([obs(make_hand("right", x=0.5, y=0.5, scale=scale), "Left", conf)], i / 30, face_box=face)
-    return e.labels, e.rejected
+    return e.labels, e.rejected + e.resting
 
 
 def test_small_hand_inside_face_box_is_dropped():
@@ -422,9 +422,14 @@ def test_small_hand_inside_face_box_is_dropped():
     assert labels == {} and len(rej) == 1
 
 
-def test_big_hand_in_front_of_face_is_kept():
-    labels, rej = _labels_with_face(2.4)
-    assert labels == {"right": "open"} and rej == []
+def test_big_hand_covering_the_face_is_ignored_until_it_clears_the_region():
+    e = GestureEngine(cfg(), screen=(1920, 1080))
+    for i in range(8):
+        e.update([obs(make_hand("right", x=0.45 + 0.02 * i, y=0.5, scale=2.4), "Left", 0.9)], i / 30, face_box=FACE)
+    assert e.labels == {} and e.rejected + e.resting
+    for i in range(8):
+        e.update([obs(make_hand("right", x=0.2, y=0.85, scale=1.3), "Left", 0.9)], 1.0 + i / 30)
+    assert e.labels == {"right": "open"}
 
 
 def test_low_confidence_hand_inside_face_dropped_even_if_big():
@@ -913,17 +918,27 @@ class Writing:
 def test_writing_an_o_types_one_o_and_never_moves_the_cursor_while_the_pen_is_down():
     w = Writing()
     w.arm()
-    w.draw(template_path("o")[0])
+    w.draw(template_path("O")[0])
+    w.hold(1.0)
+    assert w.writes() == [{"op": "text", "text": "O"}]
+    assert w.pen_moves == []
+    assert w.s.e.typed == "O" and w.s.e.ink["result"]["char"] == "O"
+
+
+def test_writing_case_lower_types_a_lowercase_letter_and_shows_it_on_the_canvas():
+    w = Writing()
+    w.s.e.cfg["writing_case"] = "lower"        # what the window's case buttons do, live
+    w.arm()
+    w.draw(template_path("O")[0])
     w.hold(1.0)
     assert w.writes() == [{"op": "text", "text": "o"}]
-    assert w.pen_moves == []
     assert w.s.e.typed == "o" and w.s.e.ink["result"]["char"] == "o"
 
 
 def test_same_frames_with_the_canvas_away_move_the_cursor_and_type_nothing():
     w = Writing(active=False)
     w.hold(0.9, curl=(0, 0, 0, 0))
-    w.draw(template_path("o")[0])
+    w.draw(template_path("O")[0])
     w.hold(1.0)
     assert w.writes() == [] and any(e.kind == "move" for e in w.evs)
     assert w.s.e.ink is None
@@ -962,7 +977,7 @@ def test_flick_left_with_pending_ink_discards_it_and_emits_nothing_but_flick_rig
     for direction, want in ((+1, []), (-1, ["write_flick_right"])):
         w = Writing()
         w.arm()
-        w.draw(template_path("o")[0])
+        w.draw(template_path("O")[0])
         w.hold(0.12, curl=(0, 0, 0, 0))
         w.hold(0.3, curl=(0, 0, 0, 0))            # pen up, the letter is pending (pause is 0.6 s)
         assert w.s.e.writer.busy
@@ -972,14 +987,14 @@ def test_flick_left_with_pending_ink_discards_it_and_emits_nothing_but_flick_rig
         if direction > 0:
             assert not w.s.e.writer.busy and w.writes() == []
         else:
-            assert [e.value for _, e in w.s.kinds("write")] == [{"op": "text", "text": "o"}]
-            assert w.s.e.typed == "o "
+            assert [e.value for _, e in w.s.kinds("write")] == [{"op": "text", "text": "O"}]
+            assert w.s.e.typed == "O "
 
 
 def test_a_fist_while_writing_starts_no_drag():
     w = Writing()
     w.arm()
-    w.draw(template_path("o")[0][:10])
+    w.draw(template_path("O")[0][:10])
     w.hold(0.4, curl=(1, 1, 1, 1))
     assert w.s.kinds("drag_start") == []
     w2 = Writing(active=False)
@@ -997,3 +1012,54 @@ def test_a_pinch_right_after_the_pen_lifts_is_no_click_but_a_later_one_clicks():
     w.hold(0.7, curl=(0, 0, 0, 0))
     w.hold(0.3, pinch=1.0)
     assert w.gestures().count("pinch") == 1
+
+
+# ---- hands resting on the face / head are ignored until they leave the head region
+def _rest_run(x, y, scale=1.0, n=30, face=FACE, move=0.0, face_every=True):
+    e = GestureEngine(cfg(), screen=(1920, 1080))
+    for i in range(n):
+        o = obs(make_hand("right", x=x + move * i, y=y, scale=scale), "Left", 0.95)
+        e.update([o], i / 30, face_box=face if (face_every and i % 6 == 0) else None)
+    return e
+
+
+def test_hand_resting_on_cheek_is_ignored():
+    e = _rest_run(0.62, 0.38, scale=1.3)             # palm centre right of the face box, inside the grown region
+    assert e.labels == {} and len(e.resting) == 1
+
+
+def test_hand_on_top_of_head_is_ignored():
+    e = _rest_run(0.5, 0.1, scale=1.3)               # above the face box top (0.15), inside the head region
+    assert e.labels == {} and len(e.resting) == 1
+
+
+def test_chin_on_hand_is_ignored():
+    e = _rest_run(0.5, 0.55, scale=1.3)               # just under the chin band
+    assert e.labels == {} and len(e.resting) == 1
+
+
+def test_hand_moving_past_the_face_is_kept():
+    e = _rest_run(0.2, 0.3, scale=1.3, n=30, move=0.02)
+    assert e.labels == {"right": "open"} and e.resting == []
+
+
+def test_ignored_hand_comes_back_after_leaving_the_region():
+    e = _rest_run(0.5, 0.3, scale=1.3)
+    assert e.labels == {}
+    for i in range(10):
+        e.update([obs(make_hand("right", x=0.5 + 0.04 * i, y=0.85, scale=1.3), "Left", 0.95)], 2.0 + i / 30)
+    assert e.labels == {"right": "open"} and e.resting == []
+
+
+def test_still_hand_far_from_the_face_and_unknown_face_are_kept():
+    assert _rest_run(0.15, 0.7).labels == {"right": "open"}
+    assert _rest_run(0.5, 0.3, face=None).labels == {"right": "open"}
+
+
+def test_rest_filter_can_be_switched_off():
+    c = cfg()
+    c["hand"]["rest_filter"] = False
+    e = GestureEngine(c, screen=(1920, 1080))
+    for i in range(30):
+        e.update([obs(make_hand("right", x=0.62, y=0.38, scale=1.3), "Left", 0.95)], i / 30, face_box=FACE if i % 6 == 0 else None)
+    assert e.labels == {"right": "open"}

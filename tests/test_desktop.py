@@ -119,3 +119,28 @@ def test_pick_visible_uses_window_display_and_falls_back_to_main():
     assert pick_visible(None, scr, 900, main=1) == ext["visible"]
     assert pick_visible((9000, 9000, 10, 10), scr, 900) == prim["visible"]
     assert parse_rect("10, 20, 300, 400") == (10, 20, 300, 400) and parse_rect("") is None
+
+
+def test_relative_gain_follows_the_display_under_the_cursor():
+    import config
+    from desktop import RelativePointer
+    rects = [(0.0, 0.0, 1000.0, 800.0), (-2000.0, 0.0, 2000.0, 800.0)]
+
+    def step(start):
+        p = RelativePointer(config.DEFAULTS["hand"])
+        t, x = 0.0, 0.5
+        p.update(x, 0.5, 0.1, t, rects, 1000.0, hint=start)
+        for _ in range(8):
+            t, x = t + 0.033, x + 0.01
+            pos = p.update(x, 0.5, 0.1, t, rects, 1000.0)
+        return pos[0] - start[0]
+    assert step((-1000.0, 400.0)) > 1.5 * step((500.0, 400.0))
+
+
+def test_perf_trace_line_is_rate_limited():
+    from vision import Perf
+    out = []
+    p = Perf(every=5.0, out=out.append)
+    for i in range(160):
+        p.add(i / 30, 0.01, 0.02, 0.01 if i % 2 == 0 else None, 0.001, 0.0005, 0.03)
+    assert len(out) == 1 and out[0].startswith("perf-trace fps=") and "latency=30.0ms" in out[0]
