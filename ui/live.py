@@ -107,7 +107,8 @@ class LiveView(Flipped):
     def initWithModel_(self, model):
         self = objc.super(LiveView, self).initWithFrame_(NSMakeRect(0, 0, W, 555))
         self.model = model
-        self.data = None            # latest preview dict
+        self.data = None            # latest live-view dict (None while off)
+        self.on = False
         self.camera = "off"
         self.image, self.image_n = None, -1
         self.rec = None
@@ -166,7 +167,9 @@ class LiveView(Flipped):
         self.model.set_recording(not (self.rec and self.rec.get("active")))
 
     @objc.python_method
-    def set_data(self, data, camera, rec):
+    def set_data(self, data, camera, rec, on=True):
+        self.on = bool(on)
+        self.rec_btn.setHidden_(not self.on)
         if data is not None and data["n"] != self.image_n:
             self.image_n = data["n"]
             nd = NSData.dataWithBytes_length_(data["jpg"], len(data["jpg"]))
@@ -184,6 +187,8 @@ class LiveView(Flipped):
     def drawRect_(self, rect):
         cfg = self.model.cfg
         self.draw_video(cfg)
+        if not self.on:
+            return                  # gestyq is off: only the calm placeholder (the camera is off too)
         self.draw_hands(cfg)
         self.draw_head(cfg)
         self.draw_log(cfg)
@@ -204,10 +209,17 @@ class LiveView(Flipped):
             for h in d["debug"]:
                 self.draw_hand(h, ir)
         else:
-            msg = {"no camera": "no camera", "starting": "starting camera", "ok": "waiting for frames"}.get(
-                self.camera, "camera off")
-            tw = text_width(msg, T.SIZE_TITLE)
-            put(msg, PAD + (VIDEO_W - tw) / 2, PAD + VIDEO_H / 2 - 8, T.SIZE_TITLE, T.dim())
+            if self.on:
+                msg = {"no camera": "no camera", "starting": "starting camera", "ok": "waiting for frames"}.get(
+                    self.camera, "starting camera")
+                tw = text_width(msg, T.SIZE_TITLE)
+                put(msg, PAD + (VIDEO_W - tw) / 2, PAD + VIDEO_H / 2 - 8, T.SIZE_TITLE, T.dim())
+            else:
+                msg, sub = "gestyq is off", "the camera is off. use the switch above to turn it on."
+                put(msg, PAD + (VIDEO_W - text_width(msg, T.SIZE_TITLE)) / 2, PAD + VIDEO_H / 2 - 16,
+                    T.SIZE_TITLE, T.fg2(), medium=True)
+                put(sub, PAD + (VIDEO_W - text_width(sub, T.SIZE_SMALL)) / 2, PAD + VIDEO_H / 2 + 8,
+                    T.SIZE_SMALL, T.dim())
         NSGraphicsContext.currentContext().restoreGraphicsState()
         if self.cam_note:
             put(self.cam_note, PAD + 10, PAD + VIDEO_H - 22, T.SIZE_SMALL, T.fg2())
@@ -218,8 +230,8 @@ class LiveView(Flipped):
 
     @objc.python_method
     def draw_regions(self, d, ir):
-        """Subtle red outlines (32%): the crop the detectors see while you are far (dashed), and the box of
-        camera the pointer maps onto the displays."""
+        """Subtle red outlines (32%): the crop the detectors see while you are far (dashed), and (absolute
+        pointer mode only) the box of camera the pointer maps onto the displays."""
         for key, dashed in (("zoom", True), ("box", False)):
             r = d.get(key)
             if not r:

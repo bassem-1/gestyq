@@ -9,15 +9,11 @@ from events import Event
 from tracking import HandObs
 
 
-def test_camera_and_actions_logic():
-    assert preview.camera_wanted(False, False) is False
-    assert preview.camera_wanted(True, False) is True
-    assert preview.camera_wanted(False, True) is True       # preview: window open while off
-    assert preview.actions_live(False) is False              # the window alone never clicks
-    assert preview.actions_live(True) is True
-    assert preview.mode_label(False, True) == "preview · actions off"
-    assert preview.mode_label(True, True) == "on · actions live"
-    assert preview.mode_label(False, False) == "off"
+def test_camera_runs_only_while_gestyq_is_on():
+    assert preview.camera_wanted(False) is False             # off = camera off, a window open or not
+    assert preview.camera_wanted(True) is True
+    assert preview.mode_label(False) == "off · camera off" and preview.mode_label(True) == "on"
+    assert not hasattr(preview, "actions_live")               # no preview mode any more
 
 
 def _hand():
@@ -89,7 +85,131 @@ def test_inspector_layout_and_live_geometry():
     assert live.to_view((0.1, 0.5, 0), (10, 20, 100, 50)) == pytest.approx((100.0, 45.0))
 
 
-def test_shared_state_has_preview_slots():
+def test_shared_state_has_live_slots_and_no_preview():
     from state import SharedState
     d = SharedState().get()
-    assert d["window_open"] is False and d["preview"] is None and d["recording"] is None
+    assert d["window_open"] is False and d["live"] is None and d["recording"] is None and "preview" not in d
+
+
+class _Cam:
+    """A camera that records being opened / closed."""
+    def __init__(self):
+        import types
+        self.cap, self.opened, self.closed, self.reads = None, 0, 0, 0
+        self.device, self.note = types.SimpleNamespace(uid="u1", name="test camera"), ""
+
+    def open(self):
+        self.opened += 1
+        self.cap = object()
+        return True
+
+    def read(self):
+        import time
+        import numpy as np
+        time.sleep(0.004)
+        self.reads += 1
+        return True, np.zeros((72, 128, 3), np.uint8)
+
+    def close(self):
+        if self.cap is not None:
+            self.closed += 1
+        self.cap = None
+
+
+def _wait(cond, timeout=3.0):
+    import time
+    t = time.time()
+    while time.time() - t < timeout:
+        if cond():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_off_means_the_camera_is_closed_even_with_the_window_open(monkeypatch):
+    import types
+    import actions
+    import vision
+    from roi import FULL, Plan
+    from state import SharedState
+    from synth import cfg
+    monkeypatch.setattr(vision, "ensure_models", lambda: None)
+    st, c = SharedState(), cfg()
+    v = vision.VisionThread(st, c, actions.Actions(c, st))
+    v.cam = cam = _Cam()
+    v.pipe = types.SimpleNamespace(run=lambda f, now, ts, ts_f: ([], None, None, Plan(FULL, False, 0.0)),
+                                   reset=lambda: None)
+    v.start()
+    try:
+        v.set_window_open(True)                                # the window is open and gestyq is OFF
+        import time
+        time.sleep(0.3)
+        assert cam.opened == 0 and cam.cap is None and cam.reads == 0
+        d = st.get()
+        assert d["camera"] == "off" and d["live"] is None and d["window_open"] is True and d["enabled"] is False
+        v.set_enabled(True)                                    # turning on from the window starts camera + actions
+        assert _wait(lambda: cam.opened == 1 and st.get()["live"] is not None)
+        assert st.get()["camera"] == "ok"
+        v.set_enabled(False)                                   # off: the camera closes, the window stays open
+        assert _wait(lambda: cam.cap is None and st.get()["camera"] == "off")
+        assert cam.closed == 1 and st.get()["live"] is None and st.get()["window_open"] is True
+        reads = cam.reads
+        time.sleep(0.2)
+        assert cam.reads == reads and cam.opened == 1          # nothing reads or reopens while off
+        v.set_window_open(False)
+        v.set_enabled(True)                                    # on with the window closed: camera, no live view
+        assert _wait(lambda: cam.opened == 2)
+        time.sleep(0.15)
+        assert st.get()["live"] is None
+    finally:
+        v.stop()
+        v.join(timeout=3)
+    assert cam.cap is None
+
+
+def test_asleep_display_blocks_blind_actions_but_hands_wake_it():
+    import types
+    import vision
+    from desktop import Desktop
+    from events import Event
+    from state import SharedState
+    from synth import cfg, make_hand
+    from tracking import HandObs
+
+    class Act:
+        def __init__(self):
+            self.ran, self.woke, self.asleep, self.desktop = [], 0, True, Desktop()
+        def execute(self, e): self.ran.append(e.kind)
+        def display_asleep(self): return self.asleep
+        def wake_display(self): self.woke += 1
+        def release_all(self): pass
+    a = Act()
+    v = vision.VisionThread(SharedState(), cfg(), a)
+    v.set_enabled(True)
+    hand = lambda x: [HandObs(make_hand("right", x=x), "Left", 0.9)]
+    ev = [Event("gesture", {"id": "pinch", "pos": None}, pulse=True), Event("drag_end", None), Event("move", (0.5, 0.5))]
+    v._wake(10.0, hand(0.40), [])                              # first sight of a hand while asleep: wakes
+    assert v.asleep and a.woke == 1
+    v._emit(ev)
+    assert a.ran == ["drag_end"]                               # no blind click or move; a held drag is still released
+    v._wake(10.5, hand(0.45), [])                              # rate limited to once per 2 s
+    assert a.woke == 1
+    v._wake(12.1, hand(0.50), [])
+    assert a.woke == 2
+    v._wake(14.5, hand(0.50), [])                              # a still hand does not wake it
+    assert a.woke == 2
+    v._wake(16.7, hand(0.50), ev)                              # a gesture does
+    assert a.woke == 3
+    v.set_enabled(False)
+    v._wake(20.0, hand(0.9), [])
+    assert a.woke == 3                                         # off: never
+    v.set_enabled(True)
+    a.asleep, v.asleep_t = False, -1e9
+    v._wake(30.0, hand(0.3), [])
+    assert not v.asleep and a.woke == 3
+    v._emit(ev)
+    assert a.ran[-3:] == ["gesture", "drag_end", "move"]       # awake: everything runs
+    v.no_wake_until = 100.0                                    # the user just told it to sleep the display
+    a.asleep, v.asleep_t = True, -1e9
+    v._wake(40.0, hand(0.8), [])
+    assert a.woke == 3

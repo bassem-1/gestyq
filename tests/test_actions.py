@@ -240,3 +240,76 @@ def test_desktop_changes_are_visible_across_threads():
     d.set(SIDE)
     t.start(); t.join()
     assert seen == [(2, (0, 0, 3840, 1080))]
+
+
+# ---------------------------------------------------------------- hot corners, HID source, wake, key queue
+def test_hot_corners_setting_keeps_the_gesture_cursor_off_the_corners():
+    a = Rec(cfg())                                         # default: corners reachable
+    assert a.to_px(0.0, 0.0) == (0.0, 0.0) and a.to_px(1.0, 1.0) == (1000.0, 500.0)
+    a = Rec(cfg(hot_corners=False))
+    assert a.to_px(0.0, 0.0) == (4.0, 4.0) and a.to_px(1.0, 1.0) == (996.0, 496.0)
+    assert a.to_px(0.0, 0.5) == (0.0, 250.0)               # edges stay reachable
+    a.cfg["hot_corners"] = True                             # live: the window flips the same dict
+    assert a.to_px(0.0, 0.0) == (0.0, 0.0)
+
+
+def test_posted_pointer_events_use_the_hid_system_state_source(monkeypatch):
+    import Quartz
+    created, posted = [], []
+    monkeypatch.setattr(Quartz, "CGEventSourceCreate", lambda state: ("src", state))
+    monkeypatch.setattr(Quartz, "CGEventCreateMouseEvent", lambda src, typ, pt, btn: created.append(("mouse", src)) or object())
+    monkeypatch.setattr(Quartz, "CGEventCreateScrollWheelEvent", lambda src, unit, n, dy: created.append(("scroll", src)) or object())
+    monkeypatch.setattr(Quartz, "CGEventSetIntegerValueField", lambda *a: None)
+    monkeypatch.setattr(Quartz, "CGWarpMouseCursorPosition", lambda pt: None)
+    monkeypatch.setattr(Quartz, "CGAssociateMouseAndMouseCursorPosition", lambda b: None)
+    monkeypatch.setattr(Quartz, "CGEventPost", lambda tap, ev: posted.append(tap))
+    a = Actions(cfg(), None)
+    a.move_to((10.0, 10.0))
+    a._button((10.0, 10.0), True)
+    a.scroll(5)
+    hid = ("src", Quartz.kCGEventSourceStateHIDSystemState)
+    assert [k for k, _ in created] == ["mouse", "mouse", "scroll"] and all(s == hid for _, s in created)
+    assert posted == [Quartz.kCGHIDEventTap] * 3
+
+
+def test_wake_display_declares_user_activity_and_falls_back_to_caffeinate():
+    calls = []
+
+    class W(Rec):
+        def _declare_user_activity(self): calls.append("iokit")
+    a = W(cfg())
+    a.wake_display()
+    assert calls == ["iokit"] and not [c for c in a.calls if c[0] == "run"]
+
+    class Broken(Rec):
+        def _declare_user_activity(self): raise OSError("no iokit")
+    b = Broken(cfg())
+    b.wake_display()
+    assert ("run", ("caffeinate", "-u", "-t", "2")) in b.calls
+
+
+def test_quick_successive_chords_are_never_dropped_or_overlapped(monkeypatch):
+    import threading
+    import time
+    import actions as A
+    monkeypatch.setattr(A, "KEY_GAP", 0.005)
+    played, active, worst = [], [0], [0]
+    lock = threading.Lock()
+
+    class K(Actions):
+        def key_sequence(self, code, flags=0, sleep=time.sleep):
+            with lock:
+                active[0] += 1
+                worst[0] = max(worst[0], active[0])
+            time.sleep(0.02)                                # a chord takes a while to play
+            played.append((code, flags))
+            with lock:
+                active[0] -= 1
+    a = K(cfg(), None)
+    for i in range(6):                                      # six flicks' worth of ctrl+arrow in a burst
+        a.run("next_space" if i % 2 == 0 else "prev_space")
+    t = time.time()
+    while len(played) < 6 and time.time() - t < 3:
+        time.sleep(0.01)
+    ctrl = MODS["control"]
+    assert played == [(124, ctrl), (123, ctrl)] * 3 and worst[0] == 1

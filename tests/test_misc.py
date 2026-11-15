@@ -158,7 +158,8 @@ def test_no_overlay_and_no_pyautogui_anywhere():
 
 
 def test_pure_modules_have_no_platform_imports():
-    pure = ["bindings", "filters", "tracking", "gestures", "head", "gaze", "events", "config", "state", "login"]
+    pure = ["bindings", "filters", "tracking", "gestures", "head", "gaze", "events", "config", "state", "login",
+            "desktop", "roi", "preview", "wake"]
     banned = ("cv2", "mediapipe", "AppKit", "Quartz", "Foundation", "objc", "AVFoundation", "ApplicationServices")
     for m in pure:
         tree = ast.parse(open(os.path.join(ROOT, m + ".py")).read())
@@ -172,24 +173,8 @@ def test_pure_modules_have_no_platform_imports():
                 assert name.split(".")[0] not in banned, (m, name)
 
 
-def test_old_hand_defaults_are_dropped_on_load(tmp_path):
-    p = tmp_path / "c.json"
-    p.write_text(json.dumps({"config_version": 2, "hand": {
-        "min_detection_conf": 0.6, "min_presence_conf": 0.6, "swipe_dist": 0.25, "swipe_time": 0.35,
-        "pinch_on": 0.2}}))
-    h = config.load(str(p))["hand"]
-    assert h["min_detection_conf"] == 0.7 and h["min_presence_conf"] == 0.7
-    d = config.DEFAULTS["hand"]
-    assert h["swipe_dist"] == d["swipe_dist"] and h["swipe_time"] == d["swipe_time"] and h["pinch_on"] == 0.2
 
 
-def test_every_old_swipe_default_is_dropped(tmp_path):
-    p = tmp_path / "c.json"
-    p.write_text(json.dumps({"config_version": 3, "hand": {"swipe_dist": 0.18, "swipe_time": 0.45,
-                                                           "swipe_cooldown": 1.0}}))
-    h, d = config.load(str(p))["hand"], config.DEFAULTS["hand"]
-    assert (h["swipe_dist"], h["swipe_time"], h["swipe_cooldown"]) == (d["swipe_dist"], d["swipe_time"],
-                                                                       d["swipe_cooldown"])
 
 
 def test_customised_detection_conf_survives_upgrade(tmp_path):
@@ -198,11 +183,79 @@ def test_customised_detection_conf_survives_upgrade(tmp_path):
     assert config.load(str(p))["hand"]["min_detection_conf"] == 0.8
 
 
-def test_v4_defaults_move_to_palm_units_and_hd_camera(tmp_path):
+def test_old_hand_defaults_are_dropped_on_load(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"config_version": 2, "hand": {
+        "min_detection_conf": 0.6, "min_presence_conf": 0.6, "tile_move": 0.15, "pinch_on": 0.2}}))
+    h = config.load(str(p))["hand"]
+    assert h["min_detection_conf"] == 0.7 and h["min_presence_conf"] == 0.7
+    d = config.DEFAULTS["hand"]
+    assert h["tile_move"] == d["tile_move"] and h["pinch_on"] == 0.2
+
+
+def test_v4_defaults_move_to_hd_camera_and_palm_units(tmp_path):
     p = tmp_path / "c.json"
     p.write_text(json.dumps({"config_version": 4, "camera": {"width": 1280, "height": 720, "fps": 24},
-                             "hand": {"swipe_dist": 0.12, "tile_move": 0.15, "tile_gap": 0.3}}))
+                             "hand": {"tile_move": 0.15, "tile_gap": 0.3}}))
     c, d = config.load(str(p)), config.DEFAULTS
     assert (c["camera"]["width"], c["camera"]["height"]) == (1920, 1080) and c["camera"]["fps"] == 24
-    assert c["hand"]["swipe_dist"] == d["hand"]["swipe_dist"] and 1.0 <= d["hand"]["swipe_dist"] <= 1.5
     assert c["hand"]["tile_move"] == d["hand"]["tile_move"] and c["hand"]["tile_gap"] == 0.3
+
+
+def test_v6_migration_to_relative_pointer_flicks_and_the_new_zoom(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"config_version": 6, "pointer_speed": 3, "hand": {
+        "swipe_dist": 1.15, "swipe_min": 0.04, "swipe_time": 0.5, "swipe_cooldown": 0.7, "swipe_grace": 0.3,
+        "far_face_frac": 0.16, "near_face_frac": 0.20, "buffer_window": 0.3, "pinch_on": 0.2}}))
+    c, d = config.load(str(p)), config.DEFAULTS
+    assert config.CONFIG_VERSION == 7 and c["config_version"] == 7
+    assert c["pointer_mode"] == "relative" and c["hot_corners"] is True and c["pointer_speed"] == 3
+    h = c["hand"]
+    assert not [k for k in h if k.startswith("swipe_")]                  # the open-palm swipe is gone
+    assert (h["far_face_frac"], h["near_face_frac"], h["buffer_window"]) == (0.22, 0.27, 0.45)
+    assert h["pinch_on"] == 0.2                                           # a real customisation survives
+    # a deliberately tuned zoom threshold from an old file is NOT the old default, so it also survives
+    p.write_text(json.dumps({"config_version": 6, "hand": {"far_face_frac": 0.12}}))
+    assert config.load(str(p))["hand"]["far_face_frac"] == 0.12
+    # the chosen mode is kept
+    p.write_text(json.dumps({"config_version": 7, "pointer_mode": "absolute", "hot_corners": False}))
+    c = config.load(str(p))
+    assert c["pointer_mode"] == "absolute" and c["hot_corners"] is False
+
+
+def test_new_defaults_numbers():
+    h = config.DEFAULTS["hand"]
+    assert config.DEFAULTS["pointer_mode"] == "relative" and config.DEFAULTS["hot_corners"] is True
+    assert (h["far_face_frac"], h["near_face_frac"]) == (0.22, 0.27)
+    assert h["flick_speed"] == 10.0 and h["flick_travel"] == 0.8 and h["flick_time"] == 0.25
+    assert h["flick_gap"] == 0.35 and h["flick_return"] == 0.6
+    assert h["full_every"] == 5 and config.DEFAULTS["camera"]["zoom_process_width"] == 1280
+    assert sorted(config.GAIN_SCALE) == [1, 2, 3, 4] and config.GAIN_SCALE[2] == 1.0
+
+
+def test_wake_decision_and_motion():
+    import wake
+    ok = dict(asleep=True, enabled=True, moving=True, fired=False, now=10.0, last_wake=-1e9)
+    assert wake.should_wake(**ok)
+    assert not wake.should_wake(**{**ok, "asleep": False})                 # awake: nothing to do
+    assert not wake.should_wake(**{**ok, "enabled": False})                # gestyq off: never
+    assert not wake.should_wake(**{**ok, "moving": False})                 # a still hand does not wake it ...
+    assert wake.should_wake(**{**ok, "moving": False, "fired": True})      # ... a gesture does
+    assert not wake.should_wake(**{**ok, "last_wake": 9.0})                # at most once per 2 s
+    assert wake.should_wake(**{**ok, "last_wake": 7.9})
+    assert wake.hands_moved([(0.5, 0.5)], [(0.5, 0.52)]) and not wake.hands_moved([(0.5, 0.5)], [(0.5005, 0.5)])
+    assert not wake.hands_moved([(0.5, 0.5)], []) and wake.hands_moved([], [(0.5, 0.5)])
+
+
+def test_corner_guard_math():
+    from desktop import guard_corners
+    one = [(0.0, 0.0, 1920.0, 1080.0)]
+    assert guard_corners((0.0, 0.0), one) == (4.0, 4.0)
+    assert guard_corners((1919.0, 1079.0), one) == (1915.0, 1075.0)
+    assert guard_corners((2.0, 1078.0), one) == (4.0, 1075.0)
+    assert guard_corners((0.0, 500.0), one) == (0.0, 500.0)                 # edges stay reachable
+    assert guard_corners((900.0, 0.0), one) == (900.0, 0.0)
+    assert guard_corners((5.0, 5.0), one) == (5.0, 5.0)
+    two = [(0.0, 0.0, 1680.0, 1050.0), (1680.0, -569.0, 1920.0, 1080.0)]       # the second display's corners too
+    assert guard_corners((3599.0, -569.0), two) == (3595.0, -565.0)
+    assert guard_corners((1680.0, 0.0), two) == (1680.0, 0.0)                  # the seam between displays is no corner of its own

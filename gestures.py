@@ -2,18 +2,18 @@
 
 Events (see bindings.gesture_of): continuous "move", "drag_start"/"drag_move"/"drag_end", "scroll" (px,
 hand up = positive); discrete hand gestures are Event("gesture", {"id": gesture_id, "pos": (nx, ny)|None},
-pulse=True). What a gesture DOES is cfg["bindings"], read here only to decide whether to emit it
+pulse=True) (flicks also carry "hand": the role that flicked). What a gesture DOES is cfg["bindings"], read here only to decide whether to emit it
 (a gesture bound to "none" emits nothing; fist bound to "drag" drags, to anything else fires once per hold).
 """
 import math
 from collections import deque
 
 import bindings
-from config import POINTER_SCALE
-from desktop import ControlBox, margin_box
+from config import GAIN_SCALE, POINTER_SCALE
+from desktop import ControlBox, RelativePointer, from_norm, margin_box, to_norm
 from events import Event
 from filters import DeadZone, OneEuro, OneEuro2D, RingBuffer, clamp
-from tracking import HandState, HandTracker, iso, palm_anchor, palm_scale
+from tracking import FOUR, HandState, HandTracker, iso, median, palm_anchor, palm_scale
 
 REF = 1000.0   # filters work in 1/1000-screen units so cutoffs/beta are resolution independent
 
@@ -50,18 +50,37 @@ def caption_for(hands, flash=None):
     return f"{r} · {names[r].get(l, l)}"
 
 
+HELD_MODES = ("pinch_wait", "pinch", "fist_wait", "fist_done")     # the cursor stays put in these
+
+
 class PointerHand:
-    """Right hand: palm-anchored cursor, pinch / double pinch, fist (drag by default), optional dwell."""
+    """Right hand: palm-anchored cursor, pinch / double pinch, fist (drag by default), optional dwell.
+
+    Two mappings (cfg["pointer_mode"]): "relative" (default, mouse-like, see desktop.RelativePointer) and "absolute"
+    (a camera box maps onto the displays)."""
 
     def __init__(self, cfg):
         self.cfg, self.h = cfg, cfg["hand"]
         self.filt = OneEuro2D(self.h["min_cutoff"], self.h["beta"])
         self.dead = DeadZone(self.h["deadzone"])
         self.buf = RingBuffer(self.h["buffer_window"])
-        self.box = margin_box(self.h, 16 / 9, 16 / 9)      # camera control box (x0, y0, w, h), unmirrored frame
+        self.box = margin_box(self.h, 16 / 9, 16 / 9)      # absolute mode: camera control box (x0, y0, w, h)
+        self.rel = RelativePointer(self.h)
+        self.relative = cfg.get("pointer_mode", "relative") != "absolute"
+        self.rects = [(0.0, 0.0, 1920.0, 1080.0)]          # displays, global px (set by the engine)
+        self.ref_w = 1920.0                                # px width of the reference display
+        self.aspect = 16 / 9                               # camera frame width / height
+        self.hint = None                                   # the real cursor (global px): where a new track starts
         self.reset()
 
+    def set_relative(self, rel, ev):
+        if rel != self.relative:
+            self.lost(ev)
+            self.relative = rel
+
     def reset(self):
+        self.rel.end_track()
+        self.hold_until = -1e9
         self.filt.reset(); self.dead.reset(); self.buf.clear()
         self.mode = "move"            # move | pinch_wait | pinch | fist_wait | fist_done | drag
         self.cur = None               # last cursor position (normalised)
@@ -93,13 +112,37 @@ class PointerHand:
             ev.append(Event("drag_end", self.cur))
         self.reset()
 
-    def step(self, hs, now, ev, screen, scale, dwell_on):
+    def _place(self, at):
+        """The cursor was put back at `at` (normalised): the relative pointer continues from there."""
+        if self.relative:
+            self.rel.place(from_norm(at, self.rects))
+
+    def restore(self, t_start, now, ev):
+        """A flick began at t_start: put the cursor back where it was just before and keep it there a moment."""
+        self.hold_until = now + self.h.get("flick_hold", 0.2)
+        at = self.buf.at(t_start - 0.03)
+        if at is not None and self.mode == "move":
+            ev[:] = [e for e in ev if e.kind != "move"]       # this frame's move would only throw the cursor first
+            self.sent = None
+            self.cur = at
+            self._place(at)
+            self._move(at, ev)
+
+    def step(self, hs, now, ev, screen, scale, dwell_on, gain=1.0):
         h = self.h
-        self.filt.set_params(h["min_cutoff"] * scale, h["beta"] * scale)
-        nx, ny = self.map(*hs.anchor)
-        fx, fy = self.filt(nx * REF, ny * REF, now)
-        dx, dy = self.dead(fx, fy)
-        pos = (dx / REF, dy / REF)
+        held = now < self.hold_until
+        if self.relative:
+            self.rel.set_params(h["min_cutoff"] * scale, h["beta"] * scale)
+            frozen = (self.mode in HELD_MODES or hs.pinch.raw or (hs.fist_raw and self.mode != "drag") or held)
+            px = self.rel.update(1.0 - hs.anchor[0], hs.anchor[1] / self.aspect, hs.palm, now, self.rects,
+                                 self.ref_w, frozen, gain, self.hint)
+            pos = to_norm(px, self.rects)
+        else:
+            self.filt.set_params(h["min_cutoff"] * scale, h["beta"] * scale)
+            nx, ny = self.map(*hs.anchor)
+            fx, fy = self.filt(nx * REF, ny * REF, now)
+            dx, dy = self.dead(fx, fy)
+            pos = (dx / REF, dy / REF)
         self.buf.push(now, pos)
         pn, label = hs.pinch, hs.label
         act = lambda g: bindings.action_for(self.cfg, g)
@@ -110,10 +153,11 @@ class PointerHand:
             elif label == "fist" and act("fist") != "none":
                 self.mode, self.t_onset = "fist_wait", hs.label_since
             else:
-                self.cur = pos
-                self._move(pos, ev)
+                if not held:
+                    self.cur = pos
+                    self._move(pos, ev)
                 if dwell_on:
-                    self._dwell(pos, now, ev, screen)
+                    self._dwell(self.cur or pos, now, ev, screen)
                 return
             m = self.mode
         if m == "pinch_wait":
@@ -122,6 +166,7 @@ class PointerHand:
             elif pn.confirmed:
                 at = self.buf.at(self.t_onset - h["click_lookback"]) or self.cur or pos
                 self.cur = at
+                self._place(at)
                 self._move(at, ev)
                 dbl = now - self.last_click < h["double_click_gap"] and act("double_pinch") != "none"
                 self.last_click = -1e9 if dbl else now
@@ -138,6 +183,7 @@ class PointerHand:
             elif now - self.t_onset >= h["fist_hold"]:
                 at = self.buf.at(self.t_onset - h["click_lookback"]) or self.cur or pos
                 self.cur = at
+                self._place(at)
                 self._move(at, ev)
                 if act("fist") == "drag":
                     ev.append(Event("drag_start", at, pulse=True))
@@ -178,7 +224,8 @@ class PointerHand:
 
 
 class CommandHand:
-    """Left hand: pinch, two-finger vertical = scroll, fast confident-open-palm swipe."""
+    """Left hand: pinch (right click) and two-finger vertical scroll. (Flicks are handled for both hands by the
+    engine, see FlickDetector.)"""
 
     def __init__(self, cfg):
         self.cfg, self.h = cfg, cfg["hand"]
@@ -191,15 +238,8 @@ class CommandHand:
         self.prev_y = None
         self.acc = 0.0
         self.last_scroll = -1e9
-        self.swipe = deque()
-        self.swipe_last = -1e9
-        self.open_t = -1e9            # last frame with a confident open palm
-        self.prev_x = None
-        self.trace = deque()          # (t, x, y, label, confident_open) for the swipe diagnostic log
-        self.trace_last = -1e9
-        self.why = ""
 
-    def step(self, hs, now, ev, cursor, veto_swipe):
+    def step(self, hs, now, ev, cursor):
         h = self.h
         act = lambda g: bindings.action_for(self.cfg, g)
         pn, label = hs.pinch, hs.label
@@ -227,75 +267,79 @@ class CommandHand:
         else:
             self.prev_y, self.acc = None, 0.0
             self.fy.reset()
-        # swipe: starts from a confident open palm; once started it survives blurred / mislabelled frames
-        # for swipe_grace s (fast swipes blur and lose the open label), but not a fist, two fingers or a pinch
-        x = 1.0 - hs.anchor[0]
-        y = hs.anchor[1]
-        self._trace(now, x, y, hs)
-        if hs.confident_open(now):
-            self.open_t = now
-        blocked = (label in ("fist", "scroll") or pn.confirmed
-                   or now - hs.scroll_seen <= h.get("scroll_veto", 0.6))    # raw two-finger frames too
-        px = self.prev_x if self.prev_x is not None else x
-        still = abs(x - px) < 0.004                 # blur only happens while moving fast
-        self.prev_x = x
-        if blocked or (still and not hs.confident_open(now)):
-            self.open_t = -1e9        # fist / two fingers / pinch / a held non-open pose cancel a swipe
-        if not blocked and now - self.open_t <= h.get("swipe_grace", 0.3):
-            self.swipe.append((now, x, y, hs.palm))
-            while self.swipe and now - self.swipe[0][0] > h["swipe_time"]:
-                self.swipe.popleft()
-            t0, x0, y0, _ = self.swipe[0]
-            dx, dy = x - x0, y - y0
-            if abs(dx) >= self.swipe_need():
-                if now - self.swipe_last < h["swipe_cooldown"]:
-                    self.why = "cooldown"
-                elif abs(dy) >= 0.5 * abs(dx):
-                    self.why = "too vertical"
-                elif veto_swipe(dx, t0, now):
-                    self.why = "vetoed: right hand moving too"
-                else:
-                    # hand moves to the user's left (dx < 0 in mirrored x) = swipe_left
-                    gid = "swipe_left" if dx < 0 else "swipe_right"
-                    self.swipe.clear()
-                    self.why = "fired " + gid
-                    if act(gid) != "none":
-                        self.swipe_last = now
-                        ev.append(Event("gesture", {"id": gid, "pos": None}, pulse=True))
-        else:
-            if self.swipe:
-                self.why = f"swipe dropped (label={label}, pinch={pn.confirmed})"
-            self.swipe.clear()
-
-    def swipe_need(self):
-        """Sideways distance (frame widths) a swipe must cover: swipe_dist palm sizes, so the same arm
-        movement counts near and far (a far hand is small, so is its swipe), but never under swipe_min."""
-        ps = sorted(p[3] for p in self.swipe)
-        palm = ps[len(ps) // 2] if ps else 0.1
-        return max(self.h["swipe_dist"] * palm, self.h.get("swipe_min", 0.04))
-
-    def _trace(self, now, x, y, hs):
-        """Diagnostic: log one line per clear sideways hand movement saying what the engine saw."""
-        self.trace.append((now, x, y, hs.label, hs.confident_open(now)))
-        while self.trace and now - self.trace[0][0] > 0.6:
-            self.trace.popleft()
-        if now - self.trace_last < 0.8 or len(self.trace) < 3:
-            return
-        xs = [p[1] for p in self.trace]
-        lo, hi = xs.index(min(xs)), xs.index(max(xs))
-        dx = xs[hi] - xs[lo] if hi > lo else xs[lo] - xs[hi]      # signed: + = toward the user's right
-        if abs(dx) < min(0.12, self.h["swipe_dist"] * hs.palm):
-            return
-        self.trace_last = now
-        labels = "".join({"open": "O", "scroll": "2", "point": "1", "fist": "F", "other": "?"}.get(p[3], "-")
-                         + ("" if p[4] else "'") for p in self.trace)
-        print(f"swipe-trace {'right' if dx > 0 else 'left'} dx={dx:+.2f} frames={len(self.trace)} "
-              f"palm={hs.palm:.3f} need={self.h['swipe_dist'] * hs.palm:.2f} labels={labels} last={self.why or '-'}",
-              flush=True)
-        self.why = ""
 
     def lost(self):
         self.reset()
+
+
+class FlickDetector:
+    """A quick sideways flick of one hand, in ANY pose (like waving a fly away). Everything is in palm sizes, so a
+    near and a far hand behave alike. Per frame it looks at the last flick_time s of the palm anchor:
+
+      speed   the peak |dx| / dt over >= flick_span (palm sizes / s) must reach flick_speed. Cursor moves run
+              2-6 palm/s; a flick is a short burst above 10.
+      travel  the largest monotone sideways run in that window, in palm sizes, >= flick_travel (0.8), spread over
+              at least three samples with no single jump above 75% of it (a tracking glitch is not a flick).
+      line    |dy| <= flick_vert x |dx| (mostly sideways).
+
+    update() returns None (nothing happening) or a dict with dir (+1 = toward the user's right), peak, travel,
+    dy, start (time the run began) and why ("" = a flick; else why not). The engine applies the global rules
+    (gap, return stroke, vetoes) and calls reset() on the detector that fired."""
+
+    def __init__(self, h):
+        self.h = h
+        self.tr = deque()                 # (t, x, y, palm); x mirrored (user's right = +), x/y in frame widths
+
+    def reset(self):
+        self.tr.clear()
+
+    def update(self, now, x, y, palm, blocked):
+        h = self.h
+        if blocked or (self.tr and now - self.tr[-1][0] > 0.15):
+            self.tr.clear()
+        if blocked:
+            return None
+        self.tr.append((now, x, y, palm))
+        while self.tr and now - self.tr[0][0] > h["flick_time"]:
+            self.tr.popleft()
+        tr, n = self.tr, len(self.tr)
+        if n < 3:
+            return None
+        pm = max(median([p[3] for p in tr]), 1e-3)
+        span = h.get("flick_span", 0.05)
+        peak, pdir, i = 0.0, 0, 0
+        for j in range(1, n):
+            while i + 1 < j and tr[j][0] - tr[i + 1][0] >= span:
+                i += 1
+            dt = tr[j][0] - tr[i][0]
+            if dt < span:
+                continue
+            v = (tr[j][1] - tr[i][1]) / dt / pm
+            if abs(v) > peak:
+                peak, pdir = abs(v), 1 if v > 0 else -1
+        if peak < 0.6 * h["flick_speed"]:
+            return None
+        best, lo, lo_k, a, b = 0.0, 1e9, 0, 0, 0
+        for k, p in enumerate(tr):
+            v = pdir * p[1]
+            if v <= lo:
+                lo, lo_k = v, k
+            if v - lo > best:
+                best, a, b = v - lo, lo_k, k
+        travel = best / pm
+        dy = abs(tr[b][2] - tr[a][2]) / pm
+        step = max((abs(tr[k][1] - tr[k - 1][1]) for k in range(a + 1, b + 1)), default=0.0) / pm
+        why = ""
+        if peak < h["flick_speed"]:
+            why = "slow"
+        elif travel < h["flick_travel"]:
+            why = "short"
+        elif b - a < 2 or step > 0.75 * travel:
+            why = "single jump"
+        elif dy > h["flick_vert"] * travel:
+            why = "too vertical"
+        return {"dir": pdir, "peak": peak, "travel": travel, "dy": dy, "start": tr[a][0], "why": why,
+                "n": n, "palm": pm, "travel_x": best}
 
 
 class GestureEngine:
@@ -308,14 +352,18 @@ class GestureEngine:
         self.last_seen = {"right": -1e9, "left": -1e9}
         self.pointer = PointerHand(cfg)
         self.command = CommandHand(cfg)
+        self.flicks = {"right": FlickDetector(self.h), "left": FlickDetector(self.h)}
+        self.xh = {"right": deque(), "left": deque()}     # (t, mirrored x) per role, for the two-hand vetoes
+        self.fl_t, self.fl_dir, self.flick_veto_until = -1e9, 0, -1e9
+        self.trace_t = {}
         self.screen = screen
+        self.rects = None                # displays in global px; None = one display of `screen`
         self.aspect = 16 / 9             # camera frame width / height
         self.union_aspect = 16 / 9       # all displays together, width / height
         self.union_span = 1.0            # ... width / width of the primary display
         self.cbox = ControlBox(self.h)
         self.tile_hist = deque()
         self.tile_last = -1e9
-        self.xr_hist = deque()
         self.flash_text, self.flash_until = None, 0.0
         self.debug = []
         self.labels = {}
@@ -329,12 +377,14 @@ class GestureEngine:
         self.command.reset()
         self.cbox.reset()
         self.tile_hist.clear()
-        self.xr_hist.clear()
+        for k in ("right", "left"):
+            self.flicks[k].reset()
+            self.xh[k].clear()
         self.debug, self.labels = [], {}
 
     def observe_face(self, geom, now, far=None):
         """geom: roi.FaceGeom in full-frame coords (or None); far: the camera is zoomed (user far away),
-        which switches the pointer to the body-relative control box."""
+        which switches the ABSOLUTE pointer to the body-relative control box."""
         self.cbox.observe_face(geom, now)
         if far is not None:
             self.cbox.set_far(far)
@@ -342,6 +392,10 @@ class GestureEngine:
     @property
     def dragging(self):
         return self.pointer.dragging
+
+    @property
+    def relative(self):
+        return self.cfg.get("pointer_mode", "relative") != "absolute"
 
     def flash(self, text, now, dur=1.0):
         self.flash_text, self.flash_until = text, now + dur
@@ -355,17 +409,6 @@ class GestureEngine:
 
     def caption(self, now):
         return caption_for(self.labels, self.flash_text if now < self.flash_until else None)
-
-    def _veto_swipe(self, now):
-        def veto(dxl, t0, t1):
-            if "right" not in self.labels or self.labels["right"] != "open":
-                return False
-            pts = [p for p in self.xr_hist if p[0] >= t0]
-            if len(pts) < 2:
-                return False
-            dxr = pts[-1][1] - pts[0][1]
-            return dxr * dxl > 0 and abs(dxr) >= 0.5 * abs(dxl)
-        return veto
 
     def _face_veto(self, obs, now, face_box):
         """Drop phantom hands on the face: palm centre inside the face box shrunk to ~70%, hand small
@@ -390,6 +433,23 @@ class GestureEngine:
                 kept.append(o)
         return kept, bad
 
+    def _print_limited(self, key, now, text, every=0.8):
+        if now - self.trace_t.get(key, -1e9) >= every:
+            self.trace_t[key] = now
+            print(text, flush=True)
+
+    def _fist_trace(self, role, st, now):
+        """Diagnostic for tuning the fist classifier from a real log: a hand with >= 3 curled fingers."""
+        curled = [f for f in FOUR if st.states.get(f) == "curl"]
+        if len(curled) < 3:
+            return
+        r, m = st.reach, st.reach_med
+        self._print_limited(("fist", role), now,
+                            f"fist-trace {role} curled={len(curled)} reach i/m/r/p="
+                            f"{'/'.join(f'{r[f]:.2f}' for f in FOUR)} median={'/'.join(f'{m[f]:.2f}' for f in FOUR)} "
+                            f"limit={st.fist_limit:.2f} palm={st.palm:.3f} pose_raw={st.pose_raw} label={st.label} "
+                            f"pinch={st.ratio:.2f}", every=1.0)
+
     def update(self, obs, now, face_box=None):
         cfg, h = self.cfg, self.h
         ev = []
@@ -403,9 +463,10 @@ class GestureEngine:
             st.update(t.obs.lms, self.aspect, now)
             self.last_seen[role] = now
             self.labels[role] = "pinch" if st.pinch.confirmed else st.label
+            self._fist_trace(role, st, now)
             self.debug.append({"role": role, "vote": t.vote, "score": t.score, "label_mp": t.obs.label,
                                "fingers": dict(st.states), "ratio": st.ratio, "pose": st.label,
-                               "pose_raw": st.pose_raw, "reach": dict(st.reach),
+                               "pose_raw": st.pose_raw, "reach": dict(st.reach), "reach_med": dict(st.reach_med),
                                "pinch": st.pinch.confirmed, "pinch_raw": st.pinch.raw,
                                "anchor": st.anchor, "lms": t.obs.lms})
         roles = tuple(sorted((r, round(1 - self.states[r].anchor[0], 2)) for r in by))
@@ -413,27 +474,33 @@ class GestureEngine:
             self._roles_seen = tuple(r for r, _ in roles)
             print(f"roles-trace {' '.join(f'{r}@x={x}' for r, x in roles) or 'none'}", flush=True)
         speed = int(cfg.get("pointer_speed", 2))
+        rel = self.relative
+        pt = self.pointer
+        pt.set_relative(rel, ev)
         # right hand = pointer
         if "right" in by and speed > 0:
             rs = self.states["right"]
-            frozen = self.pointer.mode != "move" or rs.pinch.raw or rs.fist_raw
-            self.pointer.box = self.cbox.update(now, frozen, self.union_aspect, self.aspect,
-                                                -1 if cfg.get("swap_hands") else 1, self.union_span)
-            self.pointer.step(self.states["right"], now, ev, self.screen,
-                              POINTER_SCALE.get(speed, 1.0), bool(cfg.get("dwell_click")))
-            r = self.states["right"]
-            if r.confident_open(now):
-                self.xr_hist.append((now, 1.0 - r.anchor[0]))
-            while self.xr_hist and now - self.xr_hist[0][0] > 0.6:
-                self.xr_hist.popleft()
+            pt.rects = self.rects or [(0.0, 0.0, float(self.screen[0]), float(self.screen[1]))]
+            pt.ref_w = self.screen[0] / max(self.union_span, 0.1)
+            pt.aspect = self.aspect
+            if not rel:
+                frozen = pt.mode != "move" or rs.pinch.raw or rs.fist_raw
+                pt.box = self.cbox.update(now, frozen, self.union_aspect, self.aspect,
+                                          -1 if cfg.get("swap_hands") else 1, self.union_span)
+            pt.step(rs, now, ev, self.screen, POINTER_SCALE.get(speed, 1.0), bool(cfg.get("dwell_click")),
+                    GAIN_SCALE.get(speed, 1.0))
         elif now - self.last_seen["right"] > h["loss_grace"] or speed <= 0:
-            self.pointer.lost(ev)
-            self.xr_hist.clear()
+            pt.lost(ev)
         # left hand = commands
         if "left" in by:
-            self.command.step(self.states["left"], now, ev, self.pointer.cur, self._veto_swipe(now))
+            self.command.step(self.states["left"], now, ev, pt.cur)
         elif now - self.last_seen["left"] > h["loss_grace"]:
             self.command.lost()
+        for role in ("right", "left"):
+            if role not in by and now - self.last_seen[role] > h["loss_grace"]:
+                self.flicks[role].reset()
+                self.xh[role].clear()
+        self._flicks(by, now, ev)
         # both palms open -> tiling
         if (cfg.get("tiling", True) and "right" in by and "left" in by
                 and self.states["right"].confident_open(now) and self.states["left"].confident_open(now)
@@ -444,22 +511,91 @@ class GestureEngine:
         for e in ev:
             gid = bindings.gesture_of(e)
             if gid and e.kind in ("gesture", "drag_start"):
-                role = {"pointer": "right", "command": "left"}.get(bindings.GESTURES[gid]["hand"], "both")
+                hand = bindings.GESTURES[gid]["hand"]
+                role = (e.value.get("hand") if e.kind == "gesture" else None) or \
+                    {"pointer": "right", "command": "left"}.get(hand, "both")
                 label = bindings.ACTIONS[bindings.action_for(cfg, gid)]["label"]
                 self.flash(f"{role} · {label}", now, 0.5 if e.kind == "gesture" else 0.3)
         return ev
 
+    # -- flicks
+    def _flick_blocked(self, role, st, now):
+        """Any pose may flick except an active pinch, drag or two-finger scroll."""
+        if st.pinch.raw or st.pinch.confirmed or st.pose_raw == "scroll" or st.label == "scroll" \
+                or now - st.scroll_seen <= self.h.get("scroll_veto", 0.6):
+            return True
+        return role == "right" and self.pointer.mode in ("pinch_wait", "pinch", "fist_wait", "fist_done", "drag")
+
+    def _moved(self, role, since, now):
+        """Signed sideways travel (frame widths, + = user's right) of a hand since `since` (or None)."""
+        pts = [p for p in self.xh[role] if p[0] >= since - 0.03]
+        return pts[-1][1] - pts[0][1] if len(pts) >= 2 else None
+
+    def _flicks(self, by, now, ev):
+        h, cfg = self.h, self.cfg
+        for role, t in by.items():
+            st = self.states[role]
+            x, y = 1.0 - st.anchor[0], st.anchor[1] / self.aspect
+            xh = self.xh[role]
+            xh.append((now, x))
+            while xh and now - xh[0][0] > 0.5:
+                xh.popleft()
+        for role in ("right", "left"):
+            if role not in by:
+                continue
+            st = self.states[role]
+            x, y = 1.0 - st.anchor[0], st.anchor[1] / self.aspect
+            c = self.flicks[role].update(now, x, y, st.palm, self._flick_blocked(role, st, now))
+            if c is None:
+                continue
+            gid = "swipe_right" if c["dir"] > 0 else "swipe_left"
+            why = c["why"]
+            if not why:
+                other = "left" if role == "right" else "right"
+                om = self._moved(other, c["start"], now) if other in by else None
+                if c["dir"] == -self.fl_dir and now - self.fl_t < h["flick_return"]:
+                    why = "return stroke"
+                elif now - self.fl_t < h["flick_gap"]:
+                    why = "gap"
+                elif now < self.flick_veto_until:
+                    why = "just tiled"
+                elif (cfg.get("tiling", True) and om is not None and c["dir"] * om >= 0.5 * c["travel_x"]
+                      and self.states[other].confident_open(now) and st.confident_open(now)):
+                    why = "vetoed: both palms moving (tiling)"
+                elif bindings.action_for(cfg, gid) == "none":
+                    why = "unbound"
+            if not why:
+                why = "fired " + gid
+                self.fl_t, self.fl_dir = now, c["dir"]
+                self.flicks[role].reset()
+                ev.append(Event("gesture", {"id": gid, "pos": None, "hand": role}, pulse=True))
+                if role == "right":
+                    self.pointer.restore(c["start"], now, ev)
+                print(f"flick-trace {'right' if c['dir'] > 0 else 'left'} hand={role} peak={c['peak']:.1f} palm/s "
+                      f"travel={c['travel']:.2f} palm dy={c['dy']:.2f} palm={c['palm']:.3f} frames={c['n']} "
+                      f"need>={h['flick_speed']:.0f} palm/s, {h['flick_travel']} palm why={why}", flush=True)
+            else:
+                self._print_limited(("flick", role, why), now,
+                                    f"flick-trace {'right' if c['dir'] > 0 else 'left'} hand={role} "
+                                    f"peak={c['peak']:.1f} palm/s travel={c['travel']:.2f} palm dy={c['dy']:.2f} "
+                                    f"palm={c['palm']:.3f} frames={c['n']} need>={h['flick_speed']:.0f} palm/s, "
+                                    f"{h['flick_travel']} palm why={why}", every=0.5)
+
     def _tile(self, rs, ls, now, ev):
         c = self.h
         xr, xl = 1 - rs.anchor[0], 1 - ls.anchor[0]
-        self.tile_hist.append((now, (xr + xl) / 2, abs(xr - xl), (rs.palm + ls.palm) / 2))
+        self.tile_hist.append((now, (xr + xl) / 2, abs(xr - xl), (rs.palm + ls.palm) / 2, xr, xl))
         while self.tile_hist and now - self.tile_hist[0][0] > c["tile_window"]:
             self.tile_hist.popleft()
         if now - self.tile_last < c["tile_cooldown"] or len(self.tile_hist) < 2:
             return
         palm = sorted(p[3] for p in self.tile_hist)[len(self.tile_hist) // 2]       # palm sizes: distance independent
-        dcx = self.tile_hist[-1][1] - self.tile_hist[0][1]
-        dgap = self.tile_hist[-1][2] - self.tile_hist[0][2]
+        first, last = self.tile_hist[0], self.tile_hist[-1]
+        dcx = last[1] - first[1]
+        dgap = last[2] - first[2]
+        # both palms must travel: one hand's flick next to a resting open palm changes the gap but is no tiling
+        if min(abs(last[4] - first[4]), abs(last[5] - first[5])) < c.get("tile_both", 0.5) * palm:
+            return
         mv, gp = c["tile_move"] * palm, c["tile_gap"] * palm
         cands = [("left", -dcx / mv), ("right", dcx / mv), ("fill", dgap / gp), ("center", -dgap / gp)]
         mode, score = max(cands, key=lambda t: t[1])
@@ -473,3 +609,4 @@ class GestureEngine:
             if bindings.action_for(self.cfg, gid) != "none":
                 ev.append(Event("gesture", {"id": gid, "pos": None}, pulse=True))
                 self.tile_last = now
+                self.flick_veto_until = now + 0.8

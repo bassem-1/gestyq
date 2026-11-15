@@ -175,6 +175,20 @@ class FingerStates:
         return st
 
 
+def median(vals):
+    v = sorted(vals)
+    n = len(v)
+    return v[n // 2] if n % 2 else 0.5 * (v[n // 2 - 1] + v[n // 2])
+
+
+def fist_limit(h, palm):
+    """fist_reach, relaxed for small hands. A far hand's landmarks are a few pixels off, which inflates every
+    tip-to-wrist distance (noise only adds length), so the limit grows by up to fist_relax as palm_scale falls
+    from fist_palm_ref to 0."""
+    ref = max(h.get("fist_palm_ref", 0.06), 1e-6)
+    return h.get("fist_reach", 1.25) + h.get("fist_relax", 0.25) * clamp(1.0 - palm / ref, 0.0, 1.0)
+
+
 def classify_pose(st, reach=None, fist_reach=1.25):
     """open (all four fingers extended) | scroll (index+middle up, ring+pinky folded) | point |
     fist | other. `reach` (finger_reach) makes 'fist' strict: every fingertip must be close to the
@@ -252,6 +266,10 @@ class HandState:
         self.anchor = (0.5, 0.5)
         self.palm = 0.1               # palm_scale in frame widths (distance reference for swipe / tiling)
         self.fist_raw = False
+        self.reach_hist = deque(maxlen=max(1, int(self.h.get("fist_median", 5))))
+        self.reach_med = {}
+        self.reach_fist = {}
+        self.fist_limit = self.h.get("fist_reach", 1.25)
         self.open_frames = 0
         self.scroll_seen = -1e9
 
@@ -263,16 +281,23 @@ class HandState:
     def update(self, lms, aspect, now):
         L = iso(lms, aspect)
         self.reach = finger_reach(L)
+        self.palm = max(palm_scale(L), 1e-3)
+        self.reach_hist.append(self.reach)
+        self.reach_med = {f: median([r[f] for r in self.reach_hist]) for f in FOUR}
+        # fist test: the lower of this frame's and the median reach. A closing hand is a fist at once (no extra
+        # latency, so a pinch cannot slip in first); a noise spike on one finger is outvoted by the median.
+        self.reach_fist = {f: min(self.reach[f], self.reach_med[f]) for f in FOUR}
+        self.fist_limit = fist_limit(self.h, self.palm)
         self.states = self.fingers.update(finger_angles(L), self.reach)
-        self.pose_raw = classify_pose(self.states, self.reach, self.h.get("fist_reach", 1.25))
+        self.pose_raw = classify_pose(self.states, self.reach_fist, self.fist_limit)
         self.ratio = pinch_ratio(L)
         if (self.pose_raw == "fist" and (self.ratio < self.pinch.on or self.pinch.raw)
-                and self.reach["index"] > self.h.get("fist_pinch_reach", 1.05)):
+                and self.reach_fist["index"] > self.h.get("fist_pinch_reach", 1.05)
+                + (self.fist_limit - self.h.get("fist_reach", 1.25))):
             self.pose_raw = "other"        # thumb on a bent index that is still held out: a pinch, not a fist
         self.fist_raw = self.pose_raw == "fist"
         self.pinch.update(self.ratio, now, allowed=not self.fist_raw)
         self.anchor = palm_anchor(lms)
-        self.palm = max(palm_scale(L), 1e-3)
         self.open_frames = self.open_frames + 1 if self.pose_raw == "open" else 0
         if self.pose_raw == "scroll":
             self.scroll_seen = now

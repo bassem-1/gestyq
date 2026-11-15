@@ -36,20 +36,28 @@ login item starts with `--background`, so no window appears at login.
   `{"t": monotonic s, "aspect": w/h, "hands": [{"lms": [[x,y,z] x 21], "label": "Right", "conf": 0.97}]}`
   (unmirrored normalised landmarks; `tools/replay.py` reads them).
 
-### preview mode
+### off means off
 
-while the window is open the camera and detection run even if gestyq is off, so the live view always
-works, but no action executes: the window says `preview · actions off`. turn gestyq on (switch in the
-window, popover or gadget) and the same view runs with actions live. closing the window while off stops
-the camera; switching modes never leaves a mouse button held.
+turning gestyq off closes the camera, window open or not: the live view shows `gestyq is off` and the switch in
+the top strip turns it back on (camera and actions start together). closing the window never stops gestyq.
+under the live view and inspector a settings strip holds `pointer` (relative | absolute) and `hot corners`.
 
 ## displays, distance, camera
 
-- the pointer covers every connected display (one box of camera maps onto the union, dead corners of
-  L-shaped layouts snap to the nearest display); plug or unplug a display and it adapts within a second.
+- the pointer covers every connected display (dead corners of L-shaped layouts snap to the nearest display);
+  plug or unplug a display and it adapts within a second.
   the window status shows the display count; tiling acts on the display holding the front window.
-- when you sit far away (face under 16% of the frame) the hand detector runs on a full-resolution crop
-  around you and the pointer box shrinks to your arm span; both are outlined faintly in the live view.
+- pointer `relative` (default, like a mouse): the cursor moves by the hand's motion, measured in palm sizes so it is the
+  same near and far, through an acceleration curve (slow = precise, a brisk 30 cm move crosses a wide screen;
+  `pointer_speed` 1-4 scales the gain). the hand can be anywhere in the frame; when it leaves and comes back the
+  cursor stays where it was. `absolute`: a box of the camera maps onto the displays (drawn faintly in the live view).
+- when you sit far away (face under 22% of the frame, back to normal above 27%) the hand detector runs on a crop of
+  your upper body (about 7 face widths wide, head to waist, raised arms included) at up to 1280 px; every 5th frame
+  it also looks at the whole frame so a hand outside the crop is found again (and the crop grows around it).
+- `hot corners` (window): on, the cursor may reach the corners (a hot corner like display sleep works). off, gestures
+  keep the cursor 4 px away from the corners; edges stay reachable.
+- if the display is asleep (hot corner, idle) and gestyq is on, a moving hand or any gesture wakes it, like touching
+  the trackpad (at most every 2 s; gestures do not click while the display is asleep).
 - the camera is chosen by device id in the window (`camera` under the live view), never by position.
   auto = the built-in camera; if a chosen iphone is away, gestyq uses the built-in one and says so.
 
@@ -83,7 +91,7 @@ any held mouse button and the camera.
 | right | still for 0.9 s | dwell click (popover switch, off by default) |
 | left | thumb + index pinch | right click |
 | left | index + middle up, move up/down | scroll |
-| left | open palm, sideways swipe (1.15 palm sizes in 0.5 s, so it works near and far) | next / previous space |
+| either | flick the hand sideways, any pose, like waving a fly away (a burst above 10 palm sizes / s, 0.8+ palm sizes within 0.25 s; the return stroke is ignored) | next space (your left) / previous space (your right) |
 | both | open palms: move together left/right, spread, bring together | tile window left/right, fill, centre |
 | head | turn right and back / left and back | next app (cmd+tab) / previous app |
 | head | tilt up and hold 0.6 s | display sleep |
@@ -99,12 +107,15 @@ hands, `r` re-calibrate head. if roles are still reversed, turn on `swap hands`.
 keys in your settings file (the popover and window write the rest):
 
 - `hand.min_cutoff`, `hand.beta`, `hand.deadzone`: one euro filter on the cursor (smooth when slow, fast when fast)
-- `hand.frame_margin_x/y`: camera area mapped to the screen
+- `hand.frame_margin_x/y`: absolute mode: camera area mapped to the screen
 - `hand.pinch_on`, `hand.pinch_off`, `hand.pinch_frames`: pinch hysteresis
 - `hand.click_lookback`, `hand.fist_hold`, `hand.loss_grace`, `hand.double_click_gap`
 - `hand.ext_deg`, `hand.curl_deg`: finger joint angle thresholds
 - `hand.scroll_gain`, `hand.scroll_invert`, `hand.tile_*`
-- `hand.swipe_dist`, `hand.swipe_time`: open-palm swipe, 0.18 of the frame width within 0.45 s
+- `hand.flick_speed`, `hand.flick_travel`, `hand.flick_time`, `hand.flick_gap`, `hand.flick_return`: flick (palm sizes)
+- `hand.rel_gain`, `hand.rel_knee`, `hand.rel_max_gain`: relative pointer gain curve
+- `hand.fist_reach`, `hand.fist_median`, `hand.fist_relax`: fist classifier (relaxed for small hands)
+- `pointer_mode` relative | absolute, `hot_corners` true | false
 - `hand.spawn_frames`: a new hand must be seen this many frames in a row (5) before it acts
 - `hand.face_palm_ratio`, `hand.face_min_conf`, `hand.face_hold`: face veto. a hand whose palm centre is inside the
   face box (shrunk to 70%) is dropped when its palm is smaller than 0.4 x the face height or its handedness
@@ -114,5 +125,7 @@ keys in your settings file (the popover and window write the rest):
 - `head.yaw_deg`, `head.pitch_deg`: thresholds at sensitivity `normal`; `head.yaw_per_deg`,
   `head.pitch_per_deg` convert the nose-offset proxy to degrees
 - `pointer_speed` 0-4, `head_level` 0-4 (0 = off)
+
+diagnostic log lines (`~/Library/Logs/gestyq.log`): `flick-trace` (peak palm/s, travel, why a flick did or did not fire), `fist-trace` (per-finger reach, median, limit and palm size whenever 3+ fingers are curled), `tile-trace`, `roles-trace`.
 
 tests: `python -m pytest tests` (pure logic; the layout test needs AppKit and skips elsewhere).

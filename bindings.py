@@ -42,7 +42,7 @@ DISCRETE = [a for a, d in ACTIONS.items() if d["kind"] == "discrete"]
 
 # ---------------------------------------------------------------- gestures
 # group: section in the app window. kind: "discrete" | "drag" | "scroll" (which action kinds fit).
-# hand: "pointer" (right by default), "command" (left by default), "both", "head", "eyes".
+# hand: "pointer" (right by default), "command" (left by default), "either" (any hand), "both", "head", "eyes".
 # Order here is the order shown in the app window.
 GESTURES = {
     "pinch":          {"group": "pointer hand", "hand": "pointer", "kind": "discrete", "label": "pinch",
@@ -57,10 +57,10 @@ GESTURES = {
                        "how": "touch thumb and index tips on the other hand"},
     "two_finger":     {"group": "command hand", "hand": "command", "kind": "scroll", "label": "two fingers",
                        "how": "index and middle up, ring and pinky folded; move up or down"},
-    "swipe_left":     {"group": "command hand", "hand": "command", "kind": "discrete", "label": "swipe left",
-                       "how": "open palm, quick move to your left"},
-    "swipe_right":    {"group": "command hand", "hand": "command", "kind": "discrete", "label": "swipe right",
-                       "how": "open palm, quick move to your right"},
+    "swipe_left":     {"group": "either hand", "hand": "either", "kind": "discrete", "label": "flick left",
+                       "how": "flick either hand to your left, like waving a fly away"},
+    "swipe_right":    {"group": "either hand", "hand": "either", "kind": "discrete", "label": "flick right",
+                       "how": "flick either hand to your right, like waving a fly away"},
     "palms_left":     {"group": "both hands", "hand": "both", "kind": "discrete", "label": "both palms left",
                        "how": "both palms open, move together to your left"},
     "palms_right":    {"group": "both hands", "hand": "both", "kind": "discrete", "label": "both palms right",
@@ -92,7 +92,7 @@ DEFAULT_BINDINGS = {
     "dwell": "left_click",
     "left_pinch": "right_click",
     "two_finger": "scroll",
-    "swipe_left": "next_space",        # hand to the user's left -> next space (trackpad convention)
+    "swipe_left": "next_space",        # flick to the user's left -> next space (trackpad convention)
     "swipe_right": "prev_space",
     "palms_left": "tile_left",
     "palms_right": "tile_right",

@@ -1,10 +1,11 @@
 """Desktop model (pure Python): display rects in global CG coordinates (origin top-left of the
-primary display, y down), the union box, dead-area clamping, the aspect-adapted pointer control
-box (fixed-margin or body-relative) and Cocoa <-> top-left helpers."""
+primary display, y down), the union box, dead-area clamping, the relative (mouse-like) pointer, the
+aspect-adapted absolute pointer control box (fixed-margin or body-relative), the hot-corner guard and
+Cocoa <-> top-left helpers."""
 import math
 import threading
 
-from filters import clamp
+from filters import DeadZone, OneEuro2D, clamp
 
 CROP_FREE = (0.0, 0.0, 1.0, 1.0)
 
@@ -52,6 +53,114 @@ def to_point(nx, ny, rects):
     """Normalised control-box coords -> union bounding box -> clamped into a display."""
     x, y, w, h = union(rects)
     return clamp_to_displays((x + clamp(nx) * (w - 1), y + clamp(ny) * (h - 1)), rects)
+
+
+def to_norm(pt, rects):
+    """Global px point -> normalised union-box coords (inverse of to_point before the dead-area snap)."""
+    x, y, w, h = union(rects)
+    return ((pt[0] - x) / max(w - 1, 1.0), (pt[1] - y) / max(h - 1, 1.0))
+
+
+def from_norm(n, rects):
+    x, y, w, h = union(rects)
+    return (x + clamp(n[0]) * (w - 1), y + clamp(n[1]) * (h - 1))
+
+
+def guard_corners(pt, rects, margin=4):
+    """Keep a gesture-driven cursor `margin` px away from the corners of its display (hot corners), edges stay
+    reachable: a point inside the margin x margin square at a display corner moves to margin px from both
+    edges. Points elsewhere are unchanged."""
+    for r in rects:
+        x0, y0, x1, y1 = r[0], r[1], r[0] + r[2] - 1, r[1] + r[3] - 1
+        if not (x0 <= pt[0] <= x1 and y0 <= pt[1] <= y1):
+            continue
+        m = min(margin, (x1 - x0) / 2, (y1 - y0) / 2)
+        near_x = pt[0] < x0 + m or pt[0] > x1 - m
+        near_y = pt[1] < y0 + m or pt[1] > y1 - m
+        if near_x and near_y:
+            return (min(max(pt[0], x0 + m), x1 - m), min(max(pt[1], y0 + m), y1 - m))
+        return pt
+    return pt
+
+
+class RelativePointer:
+    """Mouse-like pointer: the cursor moves by the hand's motion, measured in PALM SIZES so it does not depend on
+    how far away the hand is, through an acceleration curve (slow = precise, fast = covers the screen).
+
+    Per frame: the anchor's step (frame widths) / smoothed palm size is added to a track-local palm-space position
+    (so a changing palm size never moves the cursor), that goes through One Euro + dead zone, and the step of the
+    result times gain(speed) x reference-display width moves the cursor px. gain = min(max_gain, rel_gain *
+    (1 + (speed / rel_knee)^2)) * the pointer_speed level's scale. A new track (first frame, or after rel_gap s
+    without frames) re-anchors: nothing moves, and the cursor starts from `hint` (the real cursor) so the hand can
+    leave and re-enter the frame at any place. The position is clamped to the displays."""
+
+    def __init__(self, h):
+        self.h = h
+        self.filt = OneEuro2D(h["min_cutoff"], h["beta"])
+        self.dead = DeadZone(h.get("rel_deadzone", 1.0))
+        self.pos = None                    # global px; survives tracks
+        self.end_track()
+
+    def end_track(self):
+        """The hand is gone: the next frame re-anchors."""
+        self.filt.reset()
+        self.dead.reset()
+        self.prev = None                   # last anchor (frame widths, mirrored x)
+        self.P = (0.0, 0.0)                # palm-space position, 1/100 palm
+        self.D = None                      # its filtered, dead-zoned value
+        self.t = None
+        self.palm = None
+        self.spd = 0.0                     # palm sizes / s
+        self.fresh = True
+
+    def set_params(self, min_cutoff, beta):
+        self.filt.set_params(min_cutoff, beta)
+
+    def place(self, pt):
+        """Put the cursor at a global px point (click lookback, flick restore)."""
+        self.pos = pt
+
+    def gain(self, speed, scale=1.0):
+        h = self.h
+        g = h.get("rel_gain", 0.08) * (1.0 + (speed / h.get("rel_knee", 2.9)) ** 2)
+        return min(g, h.get("rel_max_gain", 0.45)) * scale
+
+    def update(self, x, y, palm, now, rects, ref_w, frozen=False, scale=1.0, hint=None):
+        """x, y: anchor in frame widths, x mirrored (user's right = +x). frozen: track the hand but do not move.
+        Returns the cursor as a global px point."""
+        h = self.h
+        if self.t is not None and now - self.t > h.get("rel_gap", 0.1):
+            self.end_track()
+        if self.fresh:
+            self.fresh = False
+            if hint is not None:
+                self.pos = clamp_to_displays(hint, rects)
+            elif self.pos is None:
+                ux, uy, uw, uh = union(rects)
+                self.pos = (ux + uw / 2, uy + uh / 2)
+        if self.prev is None:
+            self.prev, self.t, self.palm = (x, y), now, max(palm, 1e-3)
+            self.D = None
+            self.filt(0.0, 0.0, now)
+            self.D = self.dead(0.0, 0.0)
+            return self.pos
+        dt = max(now - self.t, 1e-4)
+        self.palm += (palm - self.palm) * (1 - math.exp(-dt / 0.5))
+        sx, sy = (x - self.prev[0]) / self.palm, (y - self.prev[1]) / self.palm        # palm sizes this frame
+        self.prev, self.t = (x, y), now
+        skip = frozen or math.hypot(sx, sy) / dt > h.get("flick_speed", 10.0)     # a flick is not cursor motion
+        if not skip:
+            self.P = (self.P[0] + 100 * sx, self.P[1] + 100 * sy)        # skipped steps are never added: no jump later
+        fx, fy = self.filt(self.P[0], self.P[1], now)
+        dx, dy = self.dead(fx, fy)
+        mx, my = dx - self.D[0], dy - self.D[1]
+        self.D = (dx, dy)
+        self.spd += 0.5 * (math.hypot(mx, my) / 100 / dt - self.spd)
+        if skip:
+            return self.pos
+        k = self.gain(self.spd, scale) * ref_w / 100
+        self.pos = clamp_to_displays((self.pos[0] + mx * k, self.pos[1] + my * k), rects)
+        return self.pos
 
 
 class Desktop:

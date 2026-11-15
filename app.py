@@ -69,7 +69,7 @@ class Model:
 
     # -- window / bindings
     def set_window_open(self, open_):
-        self.vision.set_window_open(open_)      # open: camera runs for preview even while OFF
+        self.vision.set_window_open(open_)      # open: the live view is published while the camera runs (never starts it)
 
     def set_recording(self, on):
         self.vision.set_recording(on)

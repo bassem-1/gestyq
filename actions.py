@@ -2,10 +2,13 @@
 
 The REAL pointer is moved: CGWarpMouseCursorPosition + a posted MouseMoved/LeftMouseDragged event,
 then CGAssociateMouseAndMouseCursorPosition(True). Clicks, drags, scroll and keys are CGEvents.
+Pointer, button and scroll events carry a HID-system-state event source, so they count as user activity for
+the idle / display-sleep timer like a real mouse. Hand activity also wakes a sleeping display (wake_display).
 Every event is resolved to a gesture id (bindings.gesture_of) and runs the action bound to it in
 cfg["bindings"] (bindings.action_for); the action ids are bindings.ACTIONS. Media / volume keys are
 NX system-defined events (built with AppKit.NSEvent, imported lazily, posted as CGEvents).
 """
+import ctypes
 import queue
 import subprocess
 import threading
@@ -14,7 +17,7 @@ import time
 import Quartz
 
 import bindings
-from desktop import Desktop, parse_rect, pick_visible
+from desktop import Desktop, guard_corners, parse_rect, pick_visible
 from gestures import tile_rect
 
 # virtual key codes
@@ -24,6 +27,7 @@ ARROWS = (K_LEFT, K_RIGHT, K_DOWN, K_UP)
 FN_FLAG = Quartz.kCGEventFlagMaskSecondaryFn
 NUMPAD_FLAG = Quartz.kCGEventFlagMaskNumericPad
 KEY_STEP = 0.01        # s between the steps of a key sequence
+KEY_GAP = 0.06         # s between two queued chords (quick successive flicks: each plays out alone, none is dropped)
 KEY_HOLD = 0.07        # s the modifiers stay down after the main key (cmd+tab needs the switcher to register)
 NX_SOUND_UP, NX_SOUND_DOWN, NX_PLAY = 0, 1, 16     # NX_KEYTYPE_*
 MODS = {"control": Quartz.kCGEventFlagMaskControl, "command": Quartz.kCGEventFlagMaskCommand,
@@ -97,6 +101,8 @@ class Actions:
         self._poll_t = 0.0
         self._last_click = -1e9
         self._keyq, self._keythread = queue.Queue(), None
+        self._src = None
+        self._assertion = 0
 
     # -- geometry: the pointer covers the union of all active displays
     def refresh_displays(self):
@@ -122,8 +128,12 @@ class Actions:
         return self.desktop.bounds()
 
     def to_px(self, nx, ny):
-        """Normalised control-box point -> global CG point on a display (dead areas snap to the nearest)."""
-        return self.desktop.to_px(nx, ny)
+        """Normalised control-box point -> global CG point on a display (dead areas snap to the nearest). With
+        cfg["hot_corners"] off the point stays corner_px (4) away from every display corner (edges stay reachable)."""
+        pt = self.desktop.to_px(nx, ny)
+        if not self.cfg.get("hot_corners", True):
+            pt = guard_corners(pt, self.desktop.rects(), self.cfg["hand"].get("corner_px", 4))
+        return pt
 
     def location(self):
         loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
@@ -133,12 +143,58 @@ class Actions:
     def _post(ev):
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
 
+    def source(self):
+        """HID system state event source: events made with it are indistinguishable from hardware for the idle timer."""
+        if self._src is None:
+            self._src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        return self._src
+
+    # -- display sleep / wake
+    @staticmethod
+    def display_asleep():
+        try:
+            return bool(Quartz.CGDisplayIsAsleep(Quartz.CGMainDisplayID()))
+        except Exception:
+            return False
+
+    def _declare_user_activity(self):
+        """IOPMAssertionDeclareUserActivity(kIOPMUserActiveLocal): what a trackpad touch does. Raises on failure."""
+        iokit = ctypes.CDLL("/System/Library/Frameworks/IOKit.framework/IOKit")
+        cf = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+        iokit.IOPMAssertionDeclareUserActivity.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_uint32)]
+        iokit.IOPMAssertionDeclareUserActivity.restype = ctypes.c_int
+        iokit.IOPMAssertionRelease.argtypes = [ctypes.c_uint32]
+        iokit.IOPMAssertionRelease.restype = ctypes.c_int
+        if self._assertion:                                 # release the previous one (a new one every >= 2 s)
+            iokit.IOPMAssertionRelease(self._assertion)
+            self._assertion = 0
+        name = cf.CFStringCreateWithCString(None, b"gestyq hand activity", 0x08000100)      # kCFStringEncodingUTF8
+        aid = ctypes.c_uint32(0)
+        try:
+            r = iokit.IOPMAssertionDeclareUserActivity(name, 0, ctypes.byref(aid))           # 0 = kIOPMUserActiveLocal
+        finally:
+            cf.CFRelease(name)
+        if r != 0:
+            raise OSError(f"IOPMAssertionDeclareUserActivity returned {r}")
+        self._assertion = aid.value
+
+    def wake_display(self):
+        """Wake the display like a trackpad touch; falls back to `caffeinate -u -t 2`."""
+        try:
+            self._declare_user_activity()
+        except Exception as e:
+            print("user activity assertion failed, using caffeinate:", e, flush=True)
+            self._run(["caffeinate", "-u", "-t", "2"])
+
     # -- pointer
     def move_to(self, pt, dragging=False):
         prev = self.last or pt
         Quartz.CGWarpMouseCursorPosition(pt)
         typ = Quartz.kCGEventLeftMouseDragged if dragging else Quartz.kCGEventMouseMoved
-        ev = Quartz.CGEventCreateMouseEvent(None, typ, pt, Quartz.kCGMouseButtonLeft)
+        ev = Quartz.CGEventCreateMouseEvent(self.source(), typ, pt, Quartz.kCGMouseButtonLeft)
         Quartz.CGEventSetIntegerValueField(ev, Quartz.kCGMouseEventDeltaX, int(round(pt[0] - prev[0])))
         Quartz.CGEventSetIntegerValueField(ev, Quartz.kCGMouseEventDeltaY, int(round(pt[1] - prev[1])))
         self._post(ev)
@@ -155,7 +211,7 @@ class Actions:
         else:
             typ = Quartz.kCGEventLeftMouseDown if down else Quartz.kCGEventLeftMouseUp
             btn = Quartz.kCGMouseButtonLeft
-        ev = Quartz.CGEventCreateMouseEvent(None, typ, pt, btn)
+        ev = Quartz.CGEventCreateMouseEvent(self.source(), typ, pt, btn)
         Quartz.CGEventSetIntegerValueField(ev, Quartz.kCGMouseEventClickState, count)
         self._post(ev)
 
@@ -187,6 +243,7 @@ class Actions:
             code, flags = self._keyq.get()
             try:
                 self.key_sequence(code, flags)
+                time.sleep(KEY_GAP)
             except Exception as e:
                 print("key error:", code, flags, e)
 
@@ -228,7 +285,7 @@ class Actions:
             sleep(KEY_STEP)
 
     def scroll(self, dy):
-        ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitPixel, 1, int(dy))
+        ev = Quartz.CGEventCreateScrollWheelEvent(self.source(), Quartz.kCGScrollEventUnitPixel, 1, int(dy))
         self._post(ev)
 
     def media_key(self, key):

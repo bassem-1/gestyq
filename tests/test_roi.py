@@ -1,4 +1,6 @@
-from roi import CENTER, FULL, FaceGeom, RoiPlanner, map_face, map_landmarks, rect_to_px, zoom_rect
+from roi import (CENTER, FULL, FaceGeom, RoiPlanner, contains, grow, inside, map_face, map_landmarks, merge_hands,
+                 rect_to_px, zoom_rect)
+from tracking import HandObs
 from head import FaceObs
 from synth import cfg
 
@@ -14,7 +16,7 @@ def test_zoom_rect_geometry():
     x, y, w, h = zoom_rect(g, FA, 7.0)
     assert abs(w - 0.35) < 1e-9 and abs(w * FA / (16 / 9) - h) < 1e-9          # 16:9 in pixels
     assert abs(x + w / 2 - 0.5) < 1e-9                                          # centred on the face
-    assert abs((0.40 - y) / h - 1 / 3) < 1e-9                                   # face at the upper third
+    assert abs((0.40 - y) / h - 0.2) < 1e-9                                     # eyes a fifth down: head above, waist below
     x, y, w, h = zoom_rect(FaceGeom(0.97, 0.05, 0.05), FA, 7.0)                 # clamped into the frame
     assert x + w <= 1 + 1e-9 and y == 0.0 and x >= 0
     assert zoom_rect(FaceGeom(0.5, 0.5, 0.3), FA, 7.0)[2] == 1.0                # never larger than the frame
@@ -45,11 +47,14 @@ def test_zoom_hysteresis():
         t += 0.05
         return r
     assert not step(0.30).zoom and step(0.30).rect == FULL
-    assert not step(0.17).zoom                       # above far_face_frac 0.16
-    assert step(0.10).zoom                           # enter
-    assert step(0.18).zoom                           # still zoomed between 0.16 and 0.20
-    assert not step(0.22).zoom                       # leave above 0.20
-    assert not step(0.18).zoom                       # and not re-entered until < 0.16
+    assert not step(0.25).zoom                       # a desk is 0.25-0.35 of the frame: not far
+    assert not step(0.23).zoom                       # above far_face_frac 0.22
+    assert step(0.20).zoom                           # enter
+    assert step(0.25).zoom                           # still zoomed between 0.22 and 0.27
+    assert not step(0.28).zoom                       # leave above 0.27
+    assert not step(0.25).zoom                       # and not re-entered until < 0.22
+    h = cfg()["hand"]
+    assert (h["far_face_frac"], h["near_face_frac"]) == (0.22, 0.27)
 
 
 def test_roi_is_stable_until_target_shifts_more_than_10_percent():
@@ -123,7 +128,7 @@ def test_pipeline_returns_full_frame_hands_and_face_whatever_the_crop():
 
     class Det:                                    # reports a hand at the centre of whatever crop it is shown
         def image(self, bgr): return bgr
-        def hands(self, img, ts): return [HandObs([(0.5, 0.5, 0.0)] * 21, "Left", 0.9)]
+        def hands(self, img, ts, full=False): return [HandObs([(0.5, 0.5, 0.0)] * 21, "Left", 0.9)]
         def face(self, img, ts):
             return FaceObs((0.5, 0.5), (0.4, 0.5), (0.6, 0.5), (0.5, 0.3), (0.5, 0.7), None, (0.4, 0.3, 0.6, 0.7)), None
 
@@ -140,3 +145,95 @@ def test_pipeline_returns_full_frame_hands_and_face_whatever_the_crop():
     assert abs(hands[0].lms[0][0] - (rx + rw / 2)) < 1e-9 and abs(hands[0].lms[0][1] - (ry + rh / 2)) < 1e-9
     assert abs(face.right[0] - face.left[0] - 0.2 * rw) < 1e-9 and abs(face.box[2] - face.box[0] - 0.2 * rw) < 1e-9
     assert 0 <= face.box[0] and face.box[2] <= 1
+
+
+def test_crop_takes_in_the_whole_upper_body_with_raised_arms():
+    fw = 0.10                                                   # a far user: face a tenth of the frame wide
+    g = FaceGeom(0.5, 0.35, fw)
+    x, y, w, h = zoom_rect(g, FA, cfg()["hand"]["roi_face_widths"], eye_frac=cfg()["hand"]["roi_eye_frac"])
+    face_h = 1.3 * fw * FA                                      # face height, in frame heights
+    assert 6 <= w / fw <= 7.5                                   # 6-7 face widths wide
+    assert y <= g.eye_y - 0.4 * face_h - 0.1 * face_h           # the head top (eyes are 40% down the face) and room above
+    assert y + h >= g.eye_y + 3.0 * fw * FA                     # down to the waist (~3 face widths below the eyes)
+    assert x <= g.cx - 2.5 * fw and x + w >= g.cx + 2.5 * fw    # both raised arms (2.5 face widths from the centre)
+
+
+def test_grow_contains_merge_helpers():
+    r = (0.3, 0.2, 0.3, 0.5)
+    g = grow(r, [(0.9, 0.3)], 0.1, FA)
+    assert contains(g, r) and inside(g, (0.9, 0.3)) and g[0] == r[0] and abs(g[0] + g[2] - 1.0) < 1e-9
+    assert grow(r, [(0.45, 0.4)], 0.1, FA) == (0.3, 0.2, 0.3, 0.5) or contains(grow(r, [(0.45, 0.4)], 0.1, FA), r)
+    mk = lambda x, y: HandObs([(x, y, 0.0)] * 21, "Left", 0.9)
+    base, extra = [mk(0.4, 0.5)], [mk(0.42, 0.51), mk(0.9, 0.4), mk(0.1, 0.4)]
+    out = merge_hands(base, extra, 0.06)
+    assert [o.lms[0][:2] for o in out] == [(0.4, 0.5), (0.9, 0.4)]            # dedupe by wrist, at most two hands
+    assert merge_hands([], [mk(0.2, 0.2)], 0.06)[0].lms[0][0] == 0.2 and merge_hands([mk(0.4, 0.5)], [], 0.06) == base
+
+
+def test_crop_grows_around_a_hand_outside_it_and_shrinks_back():
+    p = planner()
+    p.observe_face(FaceGeom(0.4, 0.35, 0.05), 0.0)
+    base = p.plan(0.0, True, FA).rect
+    p.observe_hands([(0.5, 0.5)], 0.1)                              # inside the crop: nothing changes
+    assert p.plan(0.1, True, FA).rect == base
+    out = (min(0.97, base[0] + base[2] + 0.2), 0.4)
+    assert not inside(base, out)
+    p.observe_hands([out], 0.2)
+    r = p.plan(0.2, True, FA).rect
+    assert inside(r, out) and contains(r, base)
+    for i in range(10):                                             # the hand stays out there and is tracked: held, stable
+        p.observe_hands([(out[0] + 0.005 * (-1) ** i, out[1])], 0.3 + 0.05 * i)
+        assert p.plan(0.3 + 0.05 * i, True, FA).rect == r
+    assert p.plan(1.0, True, FA).rect == r                          # last seen 0.2 s ago
+    p.observe_hands([], 1.1)
+    assert p.plan(2.5, True, FA).rect == base                       # gone for > roi_hand_ttl: back to the body crop
+
+
+def _pipeline_det(calls):
+    class Det:                                    # a hand in the middle of the crop, and one the full frame finds
+        def image(self, bgr): return bgr
+        def hands(self, img, ts, full=False):
+            calls.append("full" if full else "crop")
+            if full:                              # the whole frame: the same user's hand as in the crop and a far one
+                cx, cy = 0.45, 0.45
+                return [HandObs([(cx, cy, 0.0)] * 21, "Left", 0.9), HandObs([(0.92, 0.4, 0.0)] * 21, "Right", 0.9)]
+            return [HandObs([(0.5, 0.5, 0.0)] * 21, "Left", 0.9)]
+        def face(self, img, ts):
+            return None, None
+    return Det()
+
+
+def test_pipeline_runs_a_full_frame_pass_every_fifth_zoomed_frame_and_merges_by_wrist():
+    import numpy as np
+    from vision import Pipeline
+    calls = []
+    c = cfg()
+    pipe = Pipeline(c, _pipeline_det(calls))
+    raw = np.zeros((1080, 1920, 3), np.uint8)
+    seen = []
+    for i in range(12):
+        pipe.planner.observe_face(FaceGeom(0.45, 0.35, 0.05), 0.1 * i)
+        hands, _, _, plan = pipe.run(raw, 0.1 * i, i + 1, None)
+        assert plan.zoom
+        seen.append(len(hands))
+    assert calls.count("full") == 2 and calls.count("crop") == 12          # every 5th frame while zoomed
+    assert seen[4] == 2 and seen[9] == 2 and seen[0] == seen[1] == 1       # merged: the far hand joins, no duplicate wrist
+    # not zoomed: never a full-frame pass
+    calls.clear()
+    pipe = Pipeline(c, _pipeline_det(calls))
+    for i in range(12):
+        pipe.planner.observe_face(FaceGeom(0.5, 0.4, 0.30), 0.1 * i)
+        assert not pipe.run(raw, 0.1 * i, i + 1, None)[3].zoom
+    assert "full" not in calls
+
+
+def test_the_crop_grows_to_a_hand_the_full_frame_pass_found():
+    import numpy as np
+    from vision import Pipeline
+    pipe = Pipeline(cfg(), _pipeline_det([]))
+    raw = np.zeros((1080, 1920, 3), np.uint8)
+    rects = []
+    for i in range(14):
+        pipe.planner.observe_face(FaceGeom(0.45, 0.35, 0.05), 0.1 * i)
+        rects.append(pipe.run(raw, 0.1 * i, i + 1, None)[3].rect)
+    assert not inside(rects[0], (0.92, 0.4)) and inside(rects[7], (0.92, 0.4))      # after the pass at frame 5

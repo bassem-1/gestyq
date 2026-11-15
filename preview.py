@@ -1,6 +1,6 @@
-"""Preview/recording logic shared by the vision thread and the app window (pure Python).
+"""Live view / recording helpers shared by the vision thread and the app window (pure Python).
 
-camera_wanted / actions_live decide what the vision thread does; Recorder writes landmark sessions
+camera_wanted decides whether the vision thread has the camera; Recorder writes landmark sessions
 as JSON lines; GestureLog keeps the last recognised gestures for the window."""
 import json
 import os
@@ -14,20 +14,13 @@ PREVIEW_FPS = 15
 LOG_SIZE = 8
 
 
-def camera_wanted(enabled, window_open):
-    """The camera runs when gestyq is on, or while the window is open (preview)."""
-    return bool(enabled or window_open)
-
-
-def actions_live(enabled):
-    """Actions only ever execute while gestyq is on; the window alone never clicks."""
+def camera_wanted(enabled):
+    """The camera runs exactly while gestyq is on. The window being open changes nothing: off is camera off."""
     return bool(enabled)
 
 
-def mode_label(enabled, window_open):
-    if enabled:
-        return "on · actions live"
-    return "preview · actions off" if window_open else "off"
+def mode_label(enabled):
+    return "on" if enabled else "off · camera off"
 
 
 def frame_record(t, aspect, hands):
