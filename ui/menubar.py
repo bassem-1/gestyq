@@ -1,5 +1,4 @@
-"""Menu bar item: custom-drawn 18x18 template glyph (comet) + NSPopover."""
-import math
+"""Menu bar item: custom-drawn 18x18 template glyph (globe) + NSPopover."""
 import objc
 from Foundation import NSTimer
 from AppKit import (NSApplication, NSBezierPath, NSColor, NSImage, NSMakeRect, NSMinYEdge,
@@ -8,37 +7,42 @@ from AppKit import (NSApplication, NSBezierPath, NSColor, NSImage, NSMakeRect, N
 from . import theme as T
 from .popover import PopoverContent, blacken
 
-# A comet: an arc that thickens and brightens toward a solid head, the app icon's mark at 18 pt.
-# Three tones (the brand opacities .32 / .55 / 1) so it stays crisp at menu bar size. Template image,
-# so macOS tints it; the off state fades the whole glyph as one layer (no darker overlaps).
-ARC_C, ARC_R = (9.0, 7.2), 6.2
-HEAD_ANGLE, HEAD_R = 25.0, 2.9
-TONES = ((215.0, 160.0, 1.7, 0.32), (160.0, 95.0, 2.3, 0.55), (95.0, HEAD_ANGLE, 3.0, 1.0))   # from, to, width, alpha
+# The app icon's globe reduced to its silhouette for 18 pt: an outline, one meridian tilted like the icon's
+# view and the equator, all the same stroke so it reads at 11 pt. Template image (macOS tints it); off
+# drops to the .32 step of the opacity ladder.
+GLOBE_C, GLOBE_R, STROKE = (9.0, 9.0), 6.6, 1.5
 
 
-def comet(alpha=1.0):
+def globe(alpha=1.0):
+    from AppKit import NSAffineTransform, NSGraphicsContext
     from Quartz import CGContextBeginTransparencyLayer, CGContextEndTransparencyLayer, CGContextSetAlpha
-    from AppKit import NSGraphicsContext
     cg = NSGraphicsContext.currentContext().CGContext()
-    CGContextSetAlpha(cg, alpha)
+    CGContextSetAlpha(cg, alpha)                 # fade the glyph as one layer: no darker crossings when off
     CGContextBeginTransparencyLayer(cg, None)
-    for a0, a1, w, tone in TONES:
-        p = NSBezierPath.bezierPath()
-        p.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(ARC_C, ARC_R, a0, a1, True)
-        p.setLineWidth_(w)
-        NSColor.blackColor().colorWithAlphaComponent_(tone).setStroke()
-        p.stroke()
-    a = math.radians(HEAD_ANGLE)
-    x, y = ARC_C[0] + ARC_R * math.cos(a), ARC_C[1] + ARC_R * math.sin(a)
-    NSColor.blackColor().setFill()
-    NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x - HEAD_R, y - HEAD_R, 2 * HEAD_R, 2 * HEAD_R)).fill()
+    NSColor.blackColor().setStroke()
+    cx, cy = GLOBE_C
+    outline = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(cx - GLOBE_R, cy - GLOBE_R, 2 * GLOBE_R, 2 * GLOBE_R))
+    outline.setLineWidth_(STROKE)
+    outline.stroke()
+    mer = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(-GLOBE_R * 0.42, -GLOBE_R, 2 * GLOBE_R * 0.42, 2 * GLOBE_R))
+    t = NSAffineTransform.transform()
+    t.translateXBy_yBy_(cx, cy)
+    t.rotateByDegrees_(-18)                      # the icon's tilted axis
+    mer.transformUsingAffineTransform_(t)
+    mer.setLineWidth_(STROKE)
+    mer.stroke()
+    eq = NSBezierPath.bezierPath()
+    eq.moveToPoint_((cx - GLOBE_R, cy))
+    eq.lineToPoint_((cx + GLOBE_R, cy))
+    eq.setLineWidth_(STROKE)
+    eq.stroke()
     CGContextEndTransparencyLayer(cg)
 
 
 def icon(enabled):
-    """18x18 template image (macOS tints it); 35% alpha when off."""
+    """18x18 template image (macOS tints it); .32 alpha when off."""
     def draw(rect):
-        comet(1.0 if enabled else 0.35)
+        globe(1.0 if enabled else T.A_DIM)
         return True
 
     img = NSImage.imageWithSize_flipped_drawingHandler_((18, 18), False, draw)
