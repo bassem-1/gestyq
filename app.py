@@ -19,7 +19,7 @@ import config
 import login
 from state import SharedState
 from ui.gadget import GadgetController
-from ui.menubar import MenuBar, dock_icon
+from ui.menubar import MenuBar
 from ui.window import MainWindowController
 from vision import VisionThread
 
@@ -166,7 +166,6 @@ class Delegate(NSObject):
         signal.signal(signal.SIGINT, lambda *a: m.quit())
         atexit.register(m.actions.release_all)
         self.publish_screen()
-        NSApplication.sharedApplication().setApplicationIconImage_(dock_icon())
         if not BACKGROUND:
             self.show_window()
 

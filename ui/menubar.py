@@ -1,61 +1,49 @@
-"""Menu bar item: custom-drawn 18x18 template glyph (open hand) + NSPopover."""
+"""Menu bar item: custom-drawn 18x18 template glyph (comet) + NSPopover."""
+import math
 import objc
 from Foundation import NSTimer
-from AppKit import (NSAffineTransform, NSApplication, NSBezierPath, NSColor, NSImage, NSMakeRect, NSMinYEdge,
+from AppKit import (NSApplication, NSBezierPath, NSColor, NSImage, NSMakeRect, NSMinYEdge,
                     NSObject, NSPopover, NSPopoverBehaviorTransient, NSStatusBar, NSViewController)
 
 from . import theme as T
 from .popover import PopoverContent, blacken
 
-# An open hand: palm, four fingers, thumb. One path so the off-state alpha doesn't double up where
-# shapes overlap. Deliberately unlike haptyq's floating bars.
-FINGERS = ((4.6, 14.2), (6.9, 16.4), (9.2, 16.0), (11.5, 13.8))     # (left x, top y)
-FINGER_W = 1.9
+# A comet: an arc that thickens and brightens toward a solid head, the app icon's mark at 18 pt.
+# Three tones (the brand opacities .32 / .55 / 1) so it stays crisp at menu bar size. Template image,
+# so macOS tints it; the off state fades the whole glyph as one layer (no darker overlaps).
+ARC_C, ARC_R = (9.0, 7.2), 6.2
+HEAD_ANGLE, HEAD_R = 25.0, 2.9
+TONES = ((215.0, 160.0, 1.7, 0.32), (160.0, 95.0, 2.3, 0.55), (95.0, HEAD_ANGLE, 3.0, 1.0))   # from, to, width, alpha
 
 
-def hand_path():
-    path = NSBezierPath.bezierPath()
-    path.appendBezierPath_(NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-        NSMakeRect(4.6, 1.5, 8.8, 8.0), 3.2, 3.2))                                  # palm
-    for x, top in FINGERS:
-        path.appendBezierPath_(NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(x, 7.0, FINGER_W, top - 7.0), FINGER_W / 2, FINGER_W / 2))
-    thumb = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(-1.0, 0.0, 2.0, 6.4), 1.0, 1.0)
-    t = NSAffineTransform.transform()
-    t.translateXBy_yBy_(5.8, 3.4)
-    t.rotateByDegrees_(42)
-    thumb.transformUsingAffineTransform_(t)
-    path.appendBezierPath_(thumb)
-    return path
+def comet(alpha=1.0):
+    from Quartz import CGContextBeginTransparencyLayer, CGContextEndTransparencyLayer, CGContextSetAlpha
+    from AppKit import NSGraphicsContext
+    cg = NSGraphicsContext.currentContext().CGContext()
+    CGContextSetAlpha(cg, alpha)
+    CGContextBeginTransparencyLayer(cg, None)
+    for a0, a1, w, tone in TONES:
+        p = NSBezierPath.bezierPath()
+        p.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(ARC_C, ARC_R, a0, a1, True)
+        p.setLineWidth_(w)
+        NSColor.blackColor().colorWithAlphaComponent_(tone).setStroke()
+        p.stroke()
+    a = math.radians(HEAD_ANGLE)
+    x, y = ARC_C[0] + ARC_R * math.cos(a), ARC_C[1] + ARC_R * math.sin(a)
+    NSColor.blackColor().setFill()
+    NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x - HEAD_R, y - HEAD_R, 2 * HEAD_R, 2 * HEAD_R)).fill()
+    CGContextEndTransparencyLayer(cg)
 
 
 def icon(enabled):
     """18x18 template image (macOS tints it); 35% alpha when off."""
     def draw(rect):
-        NSColor.blackColor().colorWithAlphaComponent_(1.0 if enabled else 0.35).setFill()
-        hand_path().fill()
+        comet(1.0 if enabled else 0.35)
         return True
 
     img = NSImage.imageWithSize_flipped_drawingHandler_((18, 18), False, draw)
     img.setTemplate_(True)
     return img
-
-
-def dock_icon():
-    """Red open hand on black, 128x128, for the dock while the window is open."""
-    def draw(rect):
-        T.black().setFill()
-        NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(8, 8, 112, 112), 26, 26).fill()
-        t = NSAffineTransform.transform()
-        t.translateXBy_yBy_(64 - 9 * 4.2, 64 - 9 * 4.2)
-        t.scaleBy_(4.2)
-        path = hand_path()
-        path.transformUsingAffineTransform_(t)
-        T.red().setFill()
-        path.fill()
-        return True
-
-    return NSImage.imageWithSize_flipped_drawingHandler_((128, 128), False, draw)
 
 
 class _Target(NSObject):
