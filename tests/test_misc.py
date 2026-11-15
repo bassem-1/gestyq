@@ -196,3 +196,13 @@ def test_customised_detection_conf_survives_upgrade(tmp_path):
     p = tmp_path / "c.json"
     p.write_text(json.dumps({"config_version": 2, "hand": {"min_detection_conf": 0.8}}))
     assert config.load(str(p))["hand"]["min_detection_conf"] == 0.8
+
+
+def test_v4_defaults_move_to_palm_units_and_hd_camera(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"config_version": 4, "camera": {"width": 1280, "height": 720, "fps": 24},
+                             "hand": {"swipe_dist": 0.12, "tile_move": 0.15, "tile_gap": 0.3}}))
+    c, d = config.load(str(p)), config.DEFAULTS
+    assert (c["camera"]["width"], c["camera"]["height"]) == (1920, 1080) and c["camera"]["fps"] == 24
+    assert c["hand"]["swipe_dist"] == d["hand"]["swipe_dist"] and 1.0 <= d["hand"]["swipe_dist"] <= 1.5
+    assert c["hand"]["tile_move"] == d["hand"]["tile_move"] and c["hand"]["tile_gap"] == 0.3

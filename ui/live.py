@@ -53,6 +53,56 @@ def hand_alpha(role):
     return T.A_FG if role == "right" else T.A_FG2        # pointer hand full, command hand 55%
 
 
+PICK_H = 28
+
+
+class CameraPicker(Flipped):
+    """Covers the video: `auto` and every camera as a list, the one in use filled red (like the inspector's
+    actions). Opened from the camera button, so a camera is never switched by a stray click."""
+
+    def initWithCallback_(self, cb):
+        self = objc.super(CameraPicker, self).initWithFrame_(NSMakeRect(PAD, PAD, VIDEO_W, VIDEO_H))
+        self.cb, self.rows, self.selected = cb, [], None
+        self.note = ""
+        return self
+
+    @objc.python_method
+    def set_rows(self, rows, selected, note):
+        """rows: [(key, label)], key None = auto; selected: the key that is saved."""
+        self.rows, self.selected, self.note = rows, selected, note
+        self.setNeedsDisplay_(True)
+
+    @objc.python_method
+    def row_at(self, p):
+        i = int((p.y - 34) // PICK_H)
+        return self.rows[i] if 0 <= i < len(self.rows) and p.x >= 0 else None
+
+    def mouseDown_(self, e):
+        r = self.row_at(self.convertPoint_fromView_(e.locationInWindow(), None))
+        if r:
+            self.cb(r[0])
+
+    def drawRect_(self, rect):
+        box = rrect(0, 0, VIDEO_W, VIDEO_H, T.CONTROL_RADIUS)
+        T.black().setFill()
+        box.fill()
+        put("camera", 12, 12, T.SIZE_SMALL, T.dim())
+        for i, (key, label) in enumerate(self.rows):
+            y = 34 + i * PICK_H
+            if key == self.selected:
+                T.fg().setFill()
+                rrect(6, y, VIDEO_W - 12, PICK_H - 2, T.CONTROL_RADIUS).fill()
+                put(label, 14, y + 6, T.SIZE_TITLE, T.black(), medium=True)
+            else:
+                put(label, 14, y + 6, T.SIZE_TITLE, T.fg())
+        if self.note:
+            put(self.note, 12, VIDEO_H - 22, T.SIZE_SMALL, T.fg2())
+        T.line().setStroke()
+        b = rrect(0.5, 0.5, VIDEO_W - 1, VIDEO_H - 1, T.CONTROL_RADIUS)
+        b.setLineWidth_(1)
+        b.stroke()
+
+
 class LiveView(Flipped):
     def initWithModel_(self, model):
         self = objc.super(LiveView, self).initWithFrame_(NSMakeRect(0, 0, W, 555))
@@ -63,13 +113,53 @@ class LiveView(Flipped):
         self.rec = None
         self.rec_btn = TextButton.alloc().initWithTitle_size_color_callback_("record", T.SIZE_SMALL, "fg2", self._toggle_rec)
         self.addSubview_(self.rec_btn)
+        self.cam_btn = TextButton.alloc().initWithTitle_size_color_callback_("camera", T.SIZE_SMALL, "fg2", self._toggle_picker)
+        self.addSubview_(self.cam_btn)
+        self.picker = CameraPicker.alloc().initWithCallback_(self._pick)
+        self.picker.setHidden_(True)
+        self.addSubview_(self.picker)
+        self.cam_note = ""
+        self.cam_key, self.cam_name = None, None
         self.place_button()
         return self
+
+    @objc.python_method
+    def _toggle_picker(self):
+        if self.picker.isHidden():
+            self.fill_picker()
+        self.picker.setHidden_(not self.picker.isHidden())
+
+    @objc.python_method
+    def fill_picker(self):
+        saved, dev, note = self.model.camera_choice()
+        devs = self.model.camera_devices()
+        rows = [(None, "auto · built-in camera")] + [(d.uid, d.name.lower()) for d in devs]
+        self.picker.set_rows(rows, saved, note)
+        self.devs = {d.uid: d for d in devs}
+
+    @objc.python_method
+    def _pick(self, uid):
+        self.model.set_camera(self.devs.get(uid))
+        self.picker.setHidden_(True)
+
+    @objc.python_method
+    def set_camera_info(self, key, name, note):
+        """What the vision thread actually opened (the saved choice may be away)."""
+        if (key, name, note) != (self.cam_key, self.cam_name, self.cam_note):
+            self.cam_key, self.cam_name, self.cam_note = key, name, note
+            self.cam_btn.set_title("camera · " + (name or "none").lower())
+            self.place_button()
+            if not self.picker.isHidden():
+                self.fill_picker()
+            self.setNeedsDisplay_(True)
 
     @objc.python_method
     def place_button(self):
         self.rec_btn.fit()
         self.rec_btn.setFrameOrigin_((W - PAD + 6 - self.rec_btn.frame().size.width, LOG_RULE_Y + 8))
+        self.cam_btn.fit(max_w=170)
+        self.cam_btn.setFrameOrigin_((self.rec_btn.frame().origin.x - self.cam_btn.frame().size.width - 4,
+                                      LOG_RULE_Y + 8))
 
     @objc.python_method
     def _toggle_rec(self):
@@ -110,6 +200,7 @@ class LiveView(Flipped):
             ir = fit_rect(d["aspect"], PAD, PAD, VIDEO_W, VIDEO_H)
             self.image.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
                 NSMakeRect(*ir), NSMakeRect(0, 0, 0, 0), NSCompositingOperationSourceOver, DIM_IMAGE, True, None)
+            self.draw_regions(d, ir)
             for h in d["debug"]:
                 self.draw_hand(h, ir)
         else:
@@ -118,10 +209,30 @@ class LiveView(Flipped):
             tw = text_width(msg, T.SIZE_TITLE)
             put(msg, PAD + (VIDEO_W - tw) / 2, PAD + VIDEO_H / 2 - 8, T.SIZE_TITLE, T.dim())
         NSGraphicsContext.currentContext().restoreGraphicsState()
+        if self.cam_note:
+            put(self.cam_note, PAD + 10, PAD + VIDEO_H - 22, T.SIZE_SMALL, T.fg2())
         T.line().setStroke()
         b = rrect(PAD + 0.5, PAD + 0.5, VIDEO_W - 1, VIDEO_H - 1, T.CONTROL_RADIUS)
         b.setLineWidth_(1)
         b.stroke()
+
+    @objc.python_method
+    def draw_regions(self, d, ir):
+        """Subtle red outlines (32%): the crop the detectors see while you are far (dashed), and the box of
+        camera the pointer maps onto the displays."""
+        for key, dashed in (("zoom", True), ("box", False)):
+            r = d.get(key)
+            if not r:
+                continue
+            (x0, y0), (x1, y1) = to_view((r[0], r[1]), ir), to_view((r[0] + r[2], r[1] + r[3]), ir)
+            x, y, w, h = min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)
+            p = rrect(x + 0.5, y + 0.5, w - 1, h - 1, 2)
+            p.setLineWidth_(1)
+            if dashed:
+                p.setLineDash_count_phase_([4.0, 3.0], 2, 0.0)
+            T.dim().setStroke()
+            p.stroke()
+            put(key, x + 4, y + 3, T.SIZE_SMALL, T.dim())
 
     @objc.python_method
     def draw_hand(self, h, ir):

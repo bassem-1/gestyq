@@ -43,7 +43,7 @@ def blacken(view):
 
 class PopoverContent(Flipped):
     """`model` provides: cfg, state, set(key, value), set_enabled(bool), trusted, grant_access(),
-    refresh_trust(), cycle_camera(), camera_label(), quit()."""
+    refresh_trust(), camera_label(), quit()."""
 
     def initWithModel_(self, model):
         self = objc.super(PopoverContent, self).initWithFrame_(NSMakeRect(0, 0, W, 400))
@@ -78,6 +78,8 @@ class PopoverContent(Flipped):
         m = self.model
         cfg = m.cfg
         self.title = make_text("gestyq", T.SIZE_TITLE, "fg", medium=True, h=18)
+        self.displays = make_text("", T.SIZE_SMALL, "dim", w=110, h=16, right=True)
+        self.addSubview_(self.displays)
         self.tagline = make_text("your hands and head, in control.", T.SIZE_SMALL, "fg2", w=220, h=16)
         self.master = Switch.alloc().initWithOn_callback_(m.state.get()["enabled"], m.set_enabled)
         for v in (self.title, self.tagline, self.master):
@@ -94,9 +96,9 @@ class PopoverContent(Flipped):
                        self._row("window tiling", self.sw["tiling"]),
                        self._row("dwell click", self.sw["dwell_click"]),
                        self._row("eye corners · beta", self.sw["eye_corners"])]
-        self.cam_btn = TextButton.alloc().initWithTitle_size_color_callback_(
-            m.camera_label(), T.SIZE_SMALL, "fg2", self._cycle)
-        self.rows_b = [self._row("camera", self.cam_btn, W - PAD + 6),
+        # read-only: the choice lives in the window (a one-click row here was too easy to hit by accident)
+        self.cam_text = make_text(m.camera_label(), T.SIZE_SMALL, "fg2", w=170, h=16, right=True)
+        self.rows_b = [self._row("camera", self.cam_text),
                        self._row("swap hands", self.sw["swap_hands"]),
                        self._row("desktop gadget", self.sw["desktop_gadget"]),
                        self._row("gadget floats above windows", self.sw["gadget_floats"]),
@@ -135,11 +137,6 @@ class PopoverContent(Flipped):
         self.model.grant_access()
         self.refresh()
 
-    @objc.python_method
-    def _cycle(self):
-        self.model.cycle_camera()
-        self.refresh()
-
     # -- layout / state
     @objc.python_method
     def refresh(self):
@@ -151,13 +148,13 @@ class PopoverContent(Flipped):
         self.bar_head.set_level(int(cfg["head_level"]))
         for k, s in self.sw.items():
             s.set_on(cfg[k])
-        self.cam_btn.set_title(m.camera_label())
-        self.cam_btn.fit(max_w=170)
-        self.cam_btn.setFrameOrigin_((W - PAD + 6 - self.cam_btn.frame().size.width, 4))
+        self.cam_text.set_text(m.camera_label())
         self.did_btn.setHidden_(not self.grant_clicked)
 
         y = PAD
         self.title.setFrameOrigin_((PAD, y))
+        self.displays.set_text(m.display_label())
+        self.displays.setFrameOrigin_((W - PAD - Switch.W - 10 - 110, y + 2))
         self.tagline.setFrameOrigin_((PAD, y + 20))
         self.master.setFrameOrigin_((W - PAD - Switch.W, y + 1))
         y += 36 + T.GAP

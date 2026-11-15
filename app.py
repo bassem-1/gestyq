@@ -14,13 +14,14 @@ from Foundation import NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NS
 
 import actions as actions_mod
 import bindings
+import cameras
 import config
 import login
 from state import SharedState
 from ui.gadget import GadgetController
 from ui.menubar import MenuBar, dock_icon
 from ui.window import MainWindowController
-from vision import VisionThread, list_cameras, pick_camera
+from vision import VisionThread
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP = os.environ.get("GESTYQ_APP")          # set by the gestyq.app launcher
@@ -52,12 +53,17 @@ class Model:
         self.open_window = lambda: None         # set by the delegate
         self.quitting = False
 
+    def display_count(self):
+        return self.actions.desktop.count()
+
+    def display_label(self):
+        n = self.display_count()
+        return f"{n} display" + ("" if n == 1 else "s")
+
     def set(self, key, value):
         self.cfg[key] = value
         self.saver.poke()
-        if key == "camera_name":
-            self.vision.reload_camera()
-        elif key == "launch_at_login":
+        if key == "launch_at_login":
             login.set_enabled(bool(value), HERE, app=APP)
         self.on_change()
 
@@ -92,23 +98,32 @@ class Model:
             self.trusted = t
             self.on_change()
 
-    # -- camera
-    def _names(self):
-        return [n for _, n in list_cameras()]
+    # -- camera (chosen by AVCaptureDevice uniqueID, see cameras.py)
+    def camera_devices(self):
+        return cameras.list_devices()
+
+    def camera_choice(self):
+        """-> (saved uid or None for auto, device in use or None, note)."""
+        snap = self.state.get()
+        devs = cameras.list_devices()
+        dev, note = cameras.choose(devs, self.cfg)
+        if snap["camera_uid"]:
+            dev = next((d for d in devs if d.uid == snap["camera_uid"]), dev)
+            note = snap["camera_note"]
+        return self.cfg.get("camera_id"), dev, note
 
     def camera_label(self):
-        cams = list_cameras()
-        name = dict(cams).get(pick_camera(self.cfg, cams), "no camera")
-        return name.lower()
+        _, dev, _ = self.camera_choice()
+        return dev.name.lower() if dev else "no camera"
 
-    def cycle_camera(self):
-        cams = list_cameras()
-        if not cams:
-            return
-        names = [n for _, n in cams]
-        cur = dict(cams).get(pick_camera(self.cfg, cams))
-        i = names.index(cur) if cur in names else -1
-        self.set("camera_name", names[(i + 1) % len(names)])
+    def set_camera(self, device):
+        """device: cameras.Device, or None for auto (the built-in camera). The saved choice survives the
+        camera being away; only this call changes it."""
+        self.cfg["camera_id"] = device.uid if device else None
+        self.cfg["camera_name"] = device.name if device else None
+        self.saver.poke()
+        self.vision.reload_camera()
+        self.on_change()
 
     def quit(self):
         if self.quitting:
@@ -190,7 +205,9 @@ class Delegate(NSObject):
 
     def screensChanged_(self, note):
         self.gadget.reclamp()
+        self.model.actions.refresh_displays()
         self.publish_screen()
+        self.changed()
 
     def changed(self):
         self.gadget.apply()
@@ -198,16 +215,21 @@ class Delegate(NSObject):
             self.menubar.refresh()
 
     def publish_screen(self):
-        vf = NSScreen.mainScreen().visibleFrame()
+        """Cocoa geometry of every screen, for tiling on the display that holds the front window."""
+        scr = list(NSScreen.screens())
+        rect = lambda r: (r.origin.x, r.origin.y, r.size.width, r.size.height)
+        main = NSScreen.mainScreen()
         self.model.state.update(screen={
-            "visible": (vf.origin.x, vf.origin.y, vf.size.width, vf.size.height),
-            "primary_h": NSScreen.screens()[0].frame().size.height})
+            "primary_h": scr[0].frame().size.height,
+            "screens": [{"frame": rect(s.frame()), "visible": rect(s.visibleFrame())} for s in scr],
+            "main": next((i for i, s in enumerate(scr) if main is not None and s == main), 0)})
 
     def tick_(self, timer):
         now = time.monotonic()
         m = self.model
         if now - self.last_screen > 1.0:
             self.last_screen = now
+            m.actions.refresh_displays()                # hot-plug / arrangement / resolution, even without a notification
             self.publish_screen()
         if now - self.last_trust > 1.0:                 # poll accessibility every second
             self.last_trust = now
@@ -218,7 +240,7 @@ class Delegate(NSObject):
         self.last_pulse = snap["pulse_n"]
         self.gadget.update(on, snap["caption"] if on else "paused", pulsed)
         self.menubar.set_enabled(on)
-        key = (on, m.trusted)
+        key = (on, m.trusted, m.display_count())
         if key != self.last_snap:
             self.last_snap = key
             if self.menubar.is_open:

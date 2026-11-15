@@ -14,6 +14,7 @@ import time
 import Quartz
 
 import bindings
+from desktop import Desktop, parse_rect, pick_visible
 from gestures import tile_rect
 
 # virtual key codes
@@ -32,6 +33,16 @@ MOD_KEYS = ((K_CTRL, MODS["control"]), (K_OPT, MODS["option"]), (K_SHIFT, MODS["
 NOTIFICATION_CENTER = (
     'tell application "System Events" to tell process "ControlCenter" to '
     'click menu bar item 1 of menu bar 1 whose description is "Clock"')
+DISPLAY_POLL = 1.0            # s between display layout queries from the vision thread (cheap CG calls)
+FRONT_WINDOW = '''tell application "System Events"
+  set p to first application process whose frontmost is true
+  try
+    set {x, y} to position of front window of p
+    set {w, h} to size of front window of p
+    return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
+  end try
+end tell
+return ""'''
 DOUBLE_CLICK_WINDOW = 0.6     # s: a double_click right after a click only adds the second click
 
 
@@ -55,27 +66,64 @@ def _osa(script):
         pass
 
 
+def _osa_out(script, timeout=3.0):
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def query_displays():
+    """Active displays as global CG rects [(x, y, w, h)] (origin top-left of the primary display, y down)."""
+    err, ids, n = Quartz.CGGetActiveDisplayList(16, None, None)
+    rects = []
+    for d in list(ids or [])[:n]:
+        r = Quartz.CGDisplayBounds(d)
+        rects.append((r.origin.x, r.origin.y, r.size.width, r.size.height))
+    if not rects:
+        r = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+        rects = [(r.origin.x, r.origin.y, r.size.width, r.size.height)]
+    return rects
+
+
 class Actions:
     def __init__(self, cfg, state):
         self.cfg, self.state = cfg, state
         self.lock = threading.RLock()
         self.dragging = False
         self.last = None
-        self._b, self._bt = None, 0.0
+        self.desktop = Desktop(query_displays())
+        self._poll_t = 0.0
         self._last_click = -1e9
         self._keyq, self._keythread = queue.Queue(), None
 
-    # -- geometry
+    # -- geometry: the pointer covers the union of all active displays
+    def refresh_displays(self):
+        """Any thread. Re-reads the display layout; -> True when it changed. A change drops a held
+        drag (its start point may no longer exist) so the button never stays down."""
+        try:
+            changed = self.desktop.set(query_displays())
+        except Exception as e:
+            print("display query failed:", e)
+            return False
+        if changed:
+            print("displays:", self.desktop.rects(), flush=True)
+            self.release_all()
+            self.last = None
+        return changed
+
     def bounds(self):
+        """Union of the displays (x, y, w, h); re-queried every DISPLAY_POLL s."""
         now = time.monotonic()
-        if self._b is None or now - self._bt > 2.0:
-            r = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
-            self._b, self._bt = (r.origin.x, r.origin.y, r.size.width, r.size.height), now
-        return self._b
+        if now - self._poll_t > DISPLAY_POLL:
+            self._poll_t = now
+            self.refresh_displays()
+        return self.desktop.bounds()
 
     def to_px(self, nx, ny):
-        x, y, w, h = self.bounds()
-        return (x + nx * (w - 1), y + ny * (h - 1))
+        """Normalised control-box point -> global CG point on a display (dead areas snap to the nearest)."""
+        return self.desktop.to_px(nx, ny)
 
     def location(self):
         loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
@@ -200,10 +248,17 @@ class Actions:
 
     # -- tiling (osascript, as v2)
     def tile(self, mode):
+        """On the display holding the front window (found by asking System Events; osascript is slow,
+        so off the vision thread)."""
         scr = self.state.get().get("screen")
-        if not scr:
+        if scr:
+            threading.Thread(target=self._tile, args=(mode, scr), daemon=True, name="gestyq-tile").start()
+
+    def _tile(self, mode, scr):
+        vis = pick_visible(parse_rect(_osa_out(FRONT_WINDOW)), scr["screens"], scr["primary_h"], scr.get("main", 0))
+        if not vis:
             return
-        x, y, w, h = tile_rect(mode, scr["visible"], scr["primary_h"])
+        x, y, w, h = tile_rect(mode, vis, scr["primary_h"])
         _osa(f'''tell application "System Events"
   set p to first application process whose frontmost is true
   try
@@ -274,7 +329,7 @@ end tell''')
                 if k == "move":
                     self.move_to(self.to_px(*v), self.dragging)
                 elif k == "drag_move":
-                    self.move_to(self.to_px(*v), True)
+                    self.move_to(self.to_px(*v), self.dragging)     # a dropped drag (display change) just moves
                 elif k == "drag_end":
                     if self.dragging:
                         pt = self.to_px(*v) if v else self.last or self.location()

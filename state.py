@@ -11,6 +11,9 @@ class SharedState:
             "caption": "paused",
             "pulse_n": 0,           # increments on every fired action
             "hands": 0,
+            "camera_uid": None,     # device actually in use (may differ from the saved choice) ...
+            "camera_name": "",
+            "camera_note": "",      # ... and why, e.g. "iphone camera not found · using facetime hd camera"
             "window_open": False,   # app window shown -> camera runs even while OFF (preview)
             "preview": None,        # window only: {n, t, jpg, aspect, debug, head, gestures, caption}
             "recording": None,      # {active, elapsed} while the window is open

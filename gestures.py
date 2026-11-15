@@ -10,6 +10,7 @@ from collections import deque
 
 import bindings
 from config import POINTER_SCALE
+from desktop import ControlBox, margin_box
 from events import Event
 from filters import DeadZone, OneEuro, OneEuro2D, RingBuffer, clamp
 from tracking import HandState, HandTracker, iso, palm_anchor, palm_scale
@@ -57,6 +58,7 @@ class PointerHand:
         self.filt = OneEuro2D(self.h["min_cutoff"], self.h["beta"])
         self.dead = DeadZone(self.h["deadzone"])
         self.buf = RingBuffer(self.h["buffer_window"])
+        self.box = margin_box(self.h, 16 / 9, 16 / 9)      # camera control box (x0, y0, w, h), unmirrored frame
         self.reset()
 
     def reset(self):
@@ -75,10 +77,9 @@ class PointerHand:
         return self.mode == "drag"
 
     def map(self, ax, ay):
-        h = self.h
-        mx, my = h["frame_margin_x"], h["frame_margin_y"]
-        return (clamp((1.0 - ax - mx) / (1 - 2 * mx)),      # x mirrored
-                clamp((ay - my) / (1 - 2 * my)))
+        x0, y0, w, h = self.box
+        return (clamp((x0 + w - ax) / w),                   # x mirrored
+                clamp((ay - y0) / h))
 
     def _move(self, pos, ev, kind="move"):
         if kind == "move" and self.sent is not None and abs(pos[0] - self.sent[0]) < 1e-6 \
@@ -230,6 +231,7 @@ class CommandHand:
         # for swipe_grace s (fast swipes blur and lose the open label), but not a fist, two fingers or a pinch
         x = 1.0 - hs.anchor[0]
         y = hs.anchor[1]
+        self._trace(now, x, y, hs)
         if hs.confident_open(now):
             self.open_t = now
         blocked = (label in ("fist", "scroll") or pn.confirmed
@@ -240,12 +242,12 @@ class CommandHand:
         if blocked or (still and not hs.confident_open(now)):
             self.open_t = -1e9        # fist / two fingers / pinch / a held non-open pose cancel a swipe
         if not blocked and now - self.open_t <= h.get("swipe_grace", 0.3):
-            self.swipe.append((now, x, y))
+            self.swipe.append((now, x, y, hs.palm))
             while self.swipe and now - self.swipe[0][0] > h["swipe_time"]:
                 self.swipe.popleft()
-            t0, x0, y0 = self.swipe[0]
+            t0, x0, y0, _ = self.swipe[0]
             dx, dy = x - x0, y - y0
-            if abs(dx) >= h["swipe_dist"]:
+            if abs(dx) >= self.swipe_need():
                 if now - self.swipe_last < h["swipe_cooldown"]:
                     self.why = "cooldown"
                 elif abs(dy) >= 0.5 * abs(dx):
@@ -265,6 +267,13 @@ class CommandHand:
                 self.why = f"swipe dropped (label={label}, pinch={pn.confirmed})"
             self.swipe.clear()
 
+    def swipe_need(self):
+        """Sideways distance (frame widths) a swipe must cover: swipe_dist palm sizes, so the same arm
+        movement counts near and far (a far hand is small, so is its swipe), but never under swipe_min."""
+        ps = sorted(p[3] for p in self.swipe)
+        palm = ps[len(ps) // 2] if ps else 0.1
+        return max(self.h["swipe_dist"] * palm, self.h.get("swipe_min", 0.04))
+
     def _trace(self, now, x, y, hs):
         """Diagnostic: log one line per clear sideways hand movement saying what the engine saw."""
         self.trace.append((now, x, y, hs.label, hs.confident_open(now)))
@@ -275,13 +284,14 @@ class CommandHand:
         xs = [p[1] for p in self.trace]
         lo, hi = xs.index(min(xs)), xs.index(max(xs))
         dx = xs[hi] - xs[lo] if hi > lo else xs[lo] - xs[hi]      # signed: + = toward the user's right
-        if abs(dx) < 0.12:
+        if abs(dx) < min(0.12, self.h["swipe_dist"] * hs.palm):
             return
         self.trace_last = now
         labels = "".join({"open": "O", "scroll": "2", "point": "1", "fist": "F", "other": "?"}.get(p[3], "-")
                          + ("" if p[4] else "'") for p in self.trace)
         print(f"swipe-trace {'right' if dx > 0 else 'left'} dx={dx:+.2f} frames={len(self.trace)} "
-              f"labels={labels} last={self.why or '-'}", flush=True)
+              f"palm={hs.palm:.3f} need={self.h['swipe_dist'] * hs.palm:.2f} labels={labels} last={self.why or '-'}",
+              flush=True)
         self.why = ""
 
     def lost(self):
@@ -299,7 +309,10 @@ class GestureEngine:
         self.pointer = PointerHand(cfg)
         self.command = CommandHand(cfg)
         self.screen = screen
-        self.aspect = 16 / 9
+        self.aspect = 16 / 9             # camera frame width / height
+        self.union_aspect = 16 / 9       # all displays together, width / height
+        self.union_span = 1.0            # ... width / width of the primary display
+        self.cbox = ControlBox(self.h)
         self.tile_hist = deque()
         self.tile_last = -1e9
         self.xr_hist = deque()
@@ -314,9 +327,17 @@ class GestureEngine:
         self.last_seen = {"right": -1e9, "left": -1e9}
         self.pointer.reset()
         self.command.reset()
+        self.cbox.reset()
         self.tile_hist.clear()
         self.xr_hist.clear()
         self.debug, self.labels = [], {}
+
+    def observe_face(self, geom, now, far=None):
+        """geom: roi.FaceGeom in full-frame coords (or None); far: the camera is zoomed (user far away),
+        which switches the pointer to the body-relative control box."""
+        self.cbox.observe_face(geom, now)
+        if far is not None:
+            self.cbox.set_far(far)
 
     @property
     def dragging(self):
@@ -394,6 +415,10 @@ class GestureEngine:
         speed = int(cfg.get("pointer_speed", 2))
         # right hand = pointer
         if "right" in by and speed > 0:
+            rs = self.states["right"]
+            frozen = self.pointer.mode != "move" or rs.pinch.raw or rs.fist_raw
+            self.pointer.box = self.cbox.update(now, frozen, self.union_aspect, self.aspect,
+                                                -1 if cfg.get("swap_hands") else 1, self.union_span)
             self.pointer.step(self.states["right"], now, ev, self.screen,
                               POINTER_SCALE.get(speed, 1.0), bool(cfg.get("dwell_click")))
             r = self.states["right"]
@@ -413,7 +438,7 @@ class GestureEngine:
         if (cfg.get("tiling", True) and "right" in by and "left" in by
                 and self.states["right"].confident_open(now) and self.states["left"].confident_open(now)
                 and not self.states["right"].pinch.raw and not self.states["left"].pinch.raw):
-            self._tile(self.states["right"].anchor, self.states["left"].anchor, now, ev)
+            self._tile(self.states["right"], self.states["left"], now, ev)
         else:
             self.tile_hist.clear()
         for e in ev:
@@ -424,19 +449,23 @@ class GestureEngine:
                 self.flash(f"{role} · {label}", now, 0.5 if e.kind == "gesture" else 0.3)
         return ev
 
-    def _tile(self, right, left, now, ev):
+    def _tile(self, rs, ls, now, ev):
         c = self.h
-        xr, xl = 1 - right[0], 1 - left[0]
-        self.tile_hist.append((now, (xr + xl) / 2, abs(xr - xl)))
+        xr, xl = 1 - rs.anchor[0], 1 - ls.anchor[0]
+        self.tile_hist.append((now, (xr + xl) / 2, abs(xr - xl), (rs.palm + ls.palm) / 2))
         while self.tile_hist and now - self.tile_hist[0][0] > c["tile_window"]:
             self.tile_hist.popleft()
         if now - self.tile_last < c["tile_cooldown"] or len(self.tile_hist) < 2:
             return
+        palm = sorted(p[3] for p in self.tile_hist)[len(self.tile_hist) // 2]       # palm sizes: distance independent
         dcx = self.tile_hist[-1][1] - self.tile_hist[0][1]
         dgap = self.tile_hist[-1][2] - self.tile_hist[0][2]
-        cands = [("left", -dcx / c["tile_move"]), ("right", dcx / c["tile_move"]),
-                 ("fill", dgap / c["tile_gap"]), ("center", -dgap / c["tile_gap"])]
+        mv, gp = c["tile_move"] * palm, c["tile_gap"] * palm
+        cands = [("left", -dcx / mv), ("right", dcx / mv), ("fill", dgap / gp), ("center", -dgap / gp)]
         mode, score = max(cands, key=lambda t: t[1])
+        if score >= 0.6 and now - getattr(self, "_tile_trace_t", -1e9) > 0.8:
+            self._tile_trace_t = now
+            print(f"tile-trace {mode} score={score:.2f} dcx={dcx:+.2f} dgap={dgap:+.2f} palm={palm:.3f}", flush=True)
         if score >= 1.0:
             gid = {"left": "palms_left", "right": "palms_right", "fill": "palms_apart",
                    "center": "palms_together"}[mode]

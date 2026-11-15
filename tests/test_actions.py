@@ -1,4 +1,6 @@
 """Executor routing: every binding resolves to the right primitive (primitives are recorded, not posted)."""
+import pytest
+
 import bindings
 from actions import Actions, MODS
 from events import Event
@@ -9,7 +11,8 @@ class Rec(Actions):
     def __init__(self, c):
         super().__init__(c, None)
         self.calls = []
-        self._b, self._bt = (0, 0, 1001, 501), 1e18      # fixed 1001 x 501 screen
+        self.desktop.set([(0, 0, 1001, 501)])             # fixed 1001 x 501 screen
+        self._poll_t = 1e18                               # never re-query the real displays
 
     def move_to(self, pt, dragging=False): self.calls.append(("move", pt, dragging))
     def _button(self, pt, down, right=False, count=1, middle=False):
@@ -164,3 +167,76 @@ def test_f11_has_fn_and_plain_keys_have_none():
     got = _seq(103, 0)
     assert [(k, d) for k, d, _ in got] == [(103, True), (103, False)]
     assert got[0][2] & Quartz.kCGEventFlagMaskSecondaryFn
+
+
+# ---- the pointer covers every display
+from desktop import Desktop
+
+SIDE = [(0, 0, 1920, 1080), (1920, 0, 1920, 1080)]
+L_SHAPE = [(0, 0, 1000, 1000), (1000, 500, 1000, 500)]
+NEG = [(0, 0, 1440, 900), (-1920, -180, 1920, 1080)]          # an external display left of and above the origin
+
+
+def on_a_display(pt, rects):
+    return any(r[0] <= pt[0] <= r[0] + r[2] and r[1] <= pt[1] <= r[1] + r[3] for r in rects)
+
+
+def test_union_mapping_reaches_every_display_and_snaps_dead_areas():
+    a = Rec(cfg())
+    a.desktop.set(SIDE)
+    assert a.to_px(0.0, 0.0) == (0.0, 0.0) and a.to_px(1.0, 1.0) == (3839.0, 1079.0)
+    assert a.to_px(0.75, 0.5)[0] > 1920 and a.to_px(0.25, 0.5)[0] < 1920
+    a.desktop.set(L_SHAPE)
+    assert a.to_px(0.9, 0.1) == pytest.approx((1799.1, 500.0))                # top-right corner is dead: snapped down to the display
+    for nx in (0.0, 0.3, 0.55, 0.9, 1.0):
+        for ny in (0.0, 0.2, 0.49, 0.8, 1.0):
+            assert on_a_display(a.to_px(nx, ny), L_SHAPE), (nx, ny)
+    a.desktop.set(NEG)                                          # negative global coordinates
+    assert a.to_px(0.0, 0.0) == (-1920.0, -180.0)
+    for nx in (0.0, 0.4, 0.5, 0.6, 1.0):
+        assert on_a_display(a.to_px(nx, 0.0), NEG) and on_a_display(a.to_px(nx, 1.0), NEG)
+
+
+def test_clicks_and_drags_land_on_the_second_display():
+    a = Rec(cfg())
+    a.desktop.set(SIDE)
+    a.execute(gest("pinch", (0.75, 0.5)))
+    x, y = a.calls[0][1]
+    assert 1920 <= x < 3840 and abs(y - 539.5) < 1
+    a.calls.clear()
+    a.execute(Event("drag_start", (0.9, 0.5)))
+    a.execute(Event("drag_move", (0.6, 0.5)))
+    a.execute(Event("drag_end", (0.6, 0.5)))
+    moves = [c for c in a.calls if c[0] == "move"]
+    assert moves[-1][1][0] > 1920 and all(m[2] for m in moves[1:])
+    assert [c[1] for c in a.calls if c[0] == "btn"] == [True, False] and not a.dragging
+
+
+def test_display_hot_swap_mid_drag_never_sticks_and_the_cursor_stays_on_a_display():
+    a = Rec(cfg())
+    a.desktop.set(SIDE)
+    a.execute(Event("drag_start", (0.9, 0.5)))
+    assert a.dragging
+    a.desktop.set(SIDE[:1])                                      # external display unplugged
+    a.calls.clear()
+    # what refresh_displays() does on a change, without touching the real displays
+    a.release_all()
+    a.last = None
+    assert not a.dragging and [c[1] for c in a.calls if c[0] == "btn"] == [False]     # button released
+    a.calls.clear()
+    a.execute(Event("drag_move", (0.9, 0.5)))                    # the engine still thinks it drags
+    a.execute(Event("drag_end", (0.9, 0.5)))
+    assert not [c for c in a.calls if c[0] == "btn"]             # no second release, no stray press
+    assert all(m[2] is False and on_a_display(m[1], SIDE[:1]) for m in a.calls if m[0] == "move")
+    a.desktop.set(SIDE)                                          # plugged back in: the whole union again
+    assert a.to_px(1.0, 0.5)[0] == 3839.0
+
+
+def test_desktop_changes_are_visible_across_threads():
+    d = Desktop(SIDE[:1])
+    seen = []
+    import threading
+    t = threading.Thread(target=lambda: seen.append((d.count(), d.bounds())))
+    d.set(SIDE)
+    t.start(); t.join()
+    assert seen == [(2, (0, 0, 3840, 1080))]

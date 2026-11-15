@@ -250,6 +250,7 @@ class HandState:
         self.reach = {}
         self.ratio = 9.0
         self.anchor = (0.5, 0.5)
+        self.palm = 0.1               # palm_scale in frame widths (distance reference for swipe / tiling)
         self.fist_raw = False
         self.open_frames = 0
         self.scroll_seen = -1e9
@@ -271,6 +272,7 @@ class HandState:
         self.fist_raw = self.pose_raw == "fist"
         self.pinch.update(self.ratio, now, allowed=not self.fist_raw)
         self.anchor = palm_anchor(lms)
+        self.palm = max(palm_scale(L), 1e-3)
         self.open_frames = self.open_frames + 1 if self.pose_raw == "open" else 0
         if self.pose_raw == "scroll":
             self.scroll_seen = now

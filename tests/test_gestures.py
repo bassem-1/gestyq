@@ -464,3 +464,102 @@ def test_short_natural_swipe_fires():
     for i in range(12):
         s.step(None, Lh(0.5 + 0.012 * i))       # 0.13 toward image-right = user's left, in 0.4 s
     assert len(s.gest("swipe_left")) == 1 and not s.gest("swipe_right")
+
+
+# ---- swipes and tiling are measured in palm sizes: the same arm movement works near and far
+def swipe_at(scale, travel_palms, direction=-1, frames=12):
+    """A left-hand open palm of the given size (distance) sweeping `travel_palms` palm sizes in `frames`."""
+    palm = scale * 0.0875                                       # synth hand: palm_scale 0.0875 at scale 1
+    s = Sim()
+    s.step(None, Lh(0.5, scale=scale), n=10)
+    for i in range(frames):
+        s.step(None, Lh(0.5 + direction * travel_palms * palm * i / (frames - 1), scale=scale))
+    return s
+
+
+def test_swipe_needs_the_same_palm_travel_near_and_far():
+    need = cfg()["hand"]["swipe_dist"]
+    for scale in (0.5, 0.8, 1.0, 1.5):                          # far ... near
+        fired = swipe_at(scale, need * 1.4)
+        assert len(fired.gest("swipe_right")) == 1 and not fired.gest("swipe_left"), scale
+        short = swipe_at(scale, need * 0.6)
+        assert not short.gest("swipe_right") and not short.gest("swipe_left"), scale
+
+
+def test_a_far_hand_swipe_is_a_small_frame_distance_and_a_near_one_a_big_one():
+    far = swipe_at(0.5, 1.6, +1)          # 1.6 palms of a half-size hand = 0.07 of the frame
+    near = swipe_at(1.5, 1.6, +1)         # 0.21 of the frame
+    assert len(far.gest("swipe_left")) == 1 and len(near.gest("swipe_left")) == 1
+    # the old fixed 0.12-of-frame rule would have missed the far one and fired on a flick of the near one
+    flick_near = swipe_at(1.5, 0.7, +1)   # 0.09 of the frame, but only 0.7 palms
+    assert not flick_near.gest("swipe_left")
+
+
+def test_swipe_floor_ignores_jitter_sized_movement_of_a_tiny_hand():
+    s = swipe_at(0.15, 3.0)               # a hand so far away that 3 palms are 0.04 of the frame: noise
+    assert not s.gest("swipe_right") and not s.gest("swipe_left")
+
+
+def test_tiling_distance_also_scales_with_the_palm():
+    for scale in (0.6, 1.4):
+        palm = 0.0875 * scale
+        s = Sim()
+        s.step(R(0.3, scale=scale), Lh(0.55, scale=scale), n=10)
+        for i in range(1, 11):
+            d = 2.0 * palm * i / 10                            # both hands 2 palms toward image-right
+            s.step(R(0.3 + d, scale=scale), Lh(0.55 + d, scale=scale))
+        assert s.gest("palms_left"), scale
+
+
+def test_trace_lines_are_printed_for_a_swipe_and_a_tile(capsys):
+    swipe_at(1.0, 2.0)
+    s = Sim()
+    s.step(R(0.3), Lh(0.55), n=10)
+    for i in range(1, 11):
+        s.step(R(0.3 + 0.02 * i), Lh(0.55 + 0.02 * i))
+    out = capsys.readouterr().out
+    assert "swipe-trace" in out and "tile-trace" in out and "roles-trace" in out
+
+
+# ---- the camera control box follows the desktop
+def test_pointer_box_aspect_follows_all_displays():
+    def box_for(aspect, span):
+        s = Sim()
+        s.e.union_aspect, s.e.union_span = aspect, span
+        s.step(R(0.4), n=10)
+        return s.e.pointer.box
+    one, wide, tall = box_for(16 / 9, 1.0), box_for(32 / 9, 2.0), box_for(16 / 18, 1.0)
+    fa = 16 / 9
+    for box, asp in ((one, 16 / 9), (wide, 32 / 9), (tall, 16 / 18)):
+        assert abs(box[2] * fa / box[3] - asp) < 1e-6              # physical aspect == the desktop's
+    assert one == (0.15, 0.15, 0.7, 0.7) or all(abs(a - b) < 1e-9 for a, b in zip(one, (0.15, 0.15, 0.7, 0.7)))
+    assert wide[2] >= one[2] - 1e-9 and tall[3] <= 0.7 + 1e-9
+
+
+def test_one_arm_movement_covers_the_whole_wide_desktop():
+    s = Sim()
+    s.e.union_aspect, s.e.union_span = 32 / 9, 2.0
+    s.step(R(0.84), n=15)
+    left = s.kinds("move")[-1][1].value
+    s2 = Sim()
+    s2.e.union_aspect, s2.e.union_span = 32 / 9, 2.0
+    s2.step(R(0.16), n=15)
+    right = s2.kinds("move")[-1][1].value
+    assert left[0] < 0.1 and right[0] > 0.9                        # frame edge to edge = display edge to edge
+
+
+def test_far_user_gets_the_body_relative_box_and_back_without_flapping():
+    from roi import FaceGeom
+    s = Sim()
+    face = FaceGeom(0.5, 0.35, 0.07)
+    s.e.observe_face(face, 0.0, far=False)
+    s.step(R(0.4), n=5)
+    near_box = s.e.pointer.box
+    for _ in range(40):
+        s.e.observe_face(face, s.t, far=True)
+        s.step(R(0.4))
+    far_box = s.e.pointer.box
+    assert far_box[2] < near_box[2] * 0.6                          # a small face = a small box (same arm travel)
+    assert s.e.cbox.body(s.t)
+    s.e.observe_face(None, s.t, far=False)
+    assert not s.e.cbox.body(s.t)

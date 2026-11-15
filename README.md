@@ -43,6 +43,16 @@ works, but no action executes: the window says `preview · actions off`. turn ge
 window, popover or gadget) and the same view runs with actions live. closing the window while off stops
 the camera; switching modes never leaves a mouse button held.
 
+## displays, distance, camera
+
+- the pointer covers every connected display (one box of camera maps onto the union, dead corners of
+  L-shaped layouts snap to the nearest display); plug or unplug a display and it adapts within a second.
+  the window status shows the display count; tiling acts on the display holding the front window.
+- when you sit far away (face under 16% of the frame) the hand detector runs on a full-resolution crop
+  around you and the pointer box shrinks to your arm span; both are outlined faintly in the live view.
+- the camera is chosen by device id in the window (`camera` under the live view), never by position.
+  auto = the built-in camera; if a chosen iphone is away, gestyq uses the built-in one and says so.
+
 ## bindings
 
 what each gesture does is not fixed. `bindings.py` lists every gesture and action; your choices live
@@ -73,7 +83,7 @@ any held mouse button and the camera.
 | right | still for 0.9 s | dwell click (popover switch, off by default) |
 | left | thumb + index pinch | right click |
 | left | index + middle up, move up/down | scroll |
-| left | open palm, sideways swipe (0.18 of the frame in 0.45 s) | next / previous space |
+| left | open palm, sideways swipe (1.15 palm sizes in 0.5 s, so it works near and far) | next / previous space |
 | both | open palms: move together left/right, spread, bring together | tile window left/right, fill, centre |
 | head | turn right and back / left and back | next app (cmd+tab) / previous app |
 | head | tilt up and hold 0.6 s | display sleep |

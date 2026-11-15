@@ -115,7 +115,8 @@ class MainWindowController(NSObject):
         m = self.model
         snap = m.state.get()
         on = snap["enabled"]
-        self.root.set_status(preview.mode_label(on, True), on)
+        self.root.set_status(f"{preview.mode_label(on, True)} · {m.display_label()}", on)
+        self.root.live.set_camera_info(snap["camera_uid"], snap["camera_name"], snap["camera_note"])
         data = snap.get("preview")
         n = data["n"] if data else -1
         if n != self.last_n or data is None:

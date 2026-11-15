@@ -7,12 +7,13 @@ import os
 import threading
 
 import bindings
+import cameras
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "config.json")          # shipped defaults, never written by the app
 USER_PATH = os.path.expanduser("~/Library/Application Support/gestyq/config.json")
 VERSION = "0.3.0"
-CONFIG_VERSION = 4
+CONFIG_VERSION = 6
 
 
 def user_path():
@@ -33,14 +34,19 @@ DEFAULTS = {
     "tiling": True,
     "dwell_click": False,
     "eye_corners": False,         # beta
-    "camera_name": None,          # None = auto (built-in camera)
+    "camera_id": None,            # AVCaptureDevice uniqueID of the chosen camera; None = auto (built-in camera)
+    "camera_name": None,          # its name, for display only
     "swap_hands": False,          # manual override if roles still come out reversed
     "desktop_gadget": True,
     "gadget_floats": True,
     "launch_at_login": False,
     "gadget_origin": None,        # [x, y] in Cocoa screen coords
     "flip_gaze_x": False,
-    "camera": {"width": 1280, "height": 720, "fps": 30, "process_width": 960, "face_every": 2},
+    # asks for width x height (falls back to 1280x720); detection sees `process_width` of it, or a full-resolution
+    # crop around the upper body when the user is far (see roi.py). zoom_face_every = face frames while head
+    # and eye corners are off (the face is then only the near / far reference).
+    "camera": {"width": 1920, "height": 1080, "fps": 30, "process_width": 960, "face_every": 2,
+               "zoom_face_every": 6},
     "hand": {
         "frame_margin_x": 0.15,   # camera sub-rectangle mapped to the whole screen
         "frame_margin_y": 0.15,
@@ -72,13 +78,15 @@ DEFAULTS = {
         "scroll_gain": 3000,      # px per full frame height of hand travel (10 cm is about a page)
         "scroll_deadzone": 0.0008,
         "scroll_invert": False,
-        "swipe_dist": 0.12,       # fraction of frame width ... (real swipes measured 0.12-0.2)
+        "swipe_dist": 1.15,       # palm sizes (palm_scale: mean palm width / length, ~0.10 frame widths at a normal
+                                  # desk distance, so ~0.12 of the frame; real swipes measured 0.12-0.2) ...
+        "swipe_min": 0.04,        # ... but never less than this fraction of the frame (landmark noise when far)
         "swipe_time": 0.5,        # ... within this many s
         "swipe_cooldown": 0.7,
         "swipe_grace": 0.3,       # s a swipe survives blurred / non-open frames after a confident open palm
         "tile_window": 0.6,
-        "tile_move": 0.15,
-        "tile_gap": 0.15,
+        "tile_move": 1.4,         # palm sizes of centre travel ...
+        "tile_gap": 1.4,          # ... or of change in the gap between the palms
         "tile_cooldown": 1.0,
         "spawn_frames": 5,        # a new hand must be seen this many frames in a row before it acts
         "face_hold": 0.5,         # s the last face box keeps vetoing
@@ -87,6 +95,16 @@ DEFAULTS = {
         "min_detection_conf": 0.7,
         "min_presence_conf": 0.7,
         "min_tracking_conf": 0.5,
+        # adaptive zoom + body-relative pointer box (face width / frame width = the distance reference)
+        "far_face_frac": 0.16,    # enter zoom below this face width ...
+        "near_face_frac": 0.20,   # ... leave it above this
+        "roi_face_widths": 7.0,   # crop width in face widths
+        "roi_tau": 0.3,           # s, EMA of the crop
+        "roi_shift": 0.10,        # the crop moves only when its target shifts more than this
+        "box_face_widths": 4.5,   # far: control box width in face widths (0.72 of the frame at far_face_frac)
+        "box_offset_x": 1.2,      # far: face widths toward the pointer hand's shoulder
+        "box_offset_y": 1.5,      # far: face widths below the eyes
+        "box_tau": 0.4,           # s, EMA of the control box
     },
     "handedness": {
         "label_weight": 1.0,
@@ -135,8 +153,9 @@ def _merge(base, over):
 # must not pin the new default (the app used to write its whole config).
 LEGACY_DEFAULTS = {"hand": {"ext_deg": 160.0, "curl_deg": 110.0, "vote_frames": 5, "pinch_on": 0.25,
                             "pinch_off": 0.40, "scroll_gain": 1800, "scroll_deadzone": 0.002,
-                            "swipe_dist": (0.25, 0.18), "swipe_time": (0.35, 0.45), "swipe_cooldown": 1.0,
-                            "min_detection_conf": 0.6, "min_presence_conf": 0.6}}
+                            "swipe_dist": (0.25, 0.18, 0.12), "swipe_time": (0.35, 0.45), "swipe_cooldown": 1.0,
+                            "tile_move": 0.15, "tile_gap": 0.15, "min_detection_conf": 0.6, "min_presence_conf": 0.6},
+                   "camera": {"width": 1280, "height": 720}}
 
 
 def _upgrade(raw):
@@ -148,6 +167,9 @@ def _upgrade(raw):
                 olds = v if isinstance(v, tuple) else (v,)          # every default a key ever shipped with
                 if isinstance(raw.get(sec), dict) and k in raw[sec] and raw[sec][k] in olds:
                     del raw[sec][k]
+        if cameras.is_continuity(raw.get("camera_name")):         # an accidental click on the old one-click row
+            raw["camera_name"] = None
+            raw.pop("camera_id", None)
         raw["config_version"] = CONFIG_VERSION
     actions = raw.pop("actions", None)             # v0.3 gaze map "gaze:top-left" -> action
     if isinstance(actions, dict):
