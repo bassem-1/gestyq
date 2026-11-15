@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import urllib.request
+from dataclasses import replace
 
 import cv2
 import mediapipe as mp
@@ -12,6 +13,7 @@ from mediapipe.tasks.python import vision as mp_vision
 from gaze import GazeDetector
 from gestures import GestureEngine
 from head import FaceObs, HeadTracker
+from roi import FULL, RoiPlanner, face_geom, map_face, map_landmarks, rect_to_px
 from tracking import HandObs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -53,8 +55,16 @@ def pick_camera(cfg, cams):
     return cams[0][0] if cams else 0
 
 
+def downscale(frame, pw):
+    h, w = frame.shape[:2]
+    if w > pw:
+        return cv2.resize(frame, (pw, int(round(h * pw / w))), interpolation=cv2.INTER_AREA)
+    return frame
+
+
 class Camera:
-    """1280x720@30 capture, downscaled to `process_width` for detection. Frames are NOT mirrored."""
+    """Requests 1920x1080 (falls back to 1280x720) and returns the NATIVE frame, unmirrored; the
+    pipeline crops from it and resizes to `process_width`."""
 
     def __init__(self, cfg):
         self.cfg, self.cap = cfg, None
@@ -64,27 +74,25 @@ class Camera:
         idx = pick_camera(self.cfg, list_cameras())
         cap = cv2.VideoCapture(idx, getattr(cv2, "CAP_AVFOUNDATION", 0))
         if cap.isOpened():
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, c["width"])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, c["height"])
             cap.set(cv2.CAP_PROP_FPS, c["fps"])
-            ok, _ = cap.read()
-            if ok:
-                self.cap = cap
-                return True
+            sizes = [(c["width"], c["height"])] + ([(1280, 720)] if c["width"] > 1280 else [])
+            for i, (w, h) in enumerate(sizes):
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                ok, frame = cap.read()
+                if ok and (frame.shape[1] >= 0.95 * w or i == len(sizes) - 1):
+                    self.cap = cap
+                    return True
         cap.release()
         return False
 
     def read(self):
-        """-> (ok, bgr_small). Aspect = w / h of the returned frame."""
+        """-> (ok, bgr native frame)."""
         if self.cap is None:
             return False, None
         ok, frame = self.cap.read()
         if not ok or frame is None:
             return False, None
-        pw = self.cfg["camera"]["process_width"]
-        h, w = frame.shape[:2]
-        if w > pw:
-            frame = cv2.resize(frame, (pw, int(round(h * pw / w))), interpolation=cv2.INTER_AREA)
         return True, frame
 
     def close(self):
@@ -143,6 +151,50 @@ class Detectors:
         self.hand = self.face_lm = None
 
 
+class Pipeline:
+    """Native frame -> hands / face in FULL-FRAME normalised coords. Crops the planned ROI from the
+    full-resolution frame, so tracks and filters stay continuous when the ROI moves."""
+
+    def __init__(self, cfg, det):
+        self.cfg, self.det = cfg, det
+        self.planner = RoiPlanner(cfg["hand"])
+        self.plan = None
+        self._seen = False
+
+    def reset(self):
+        self.planner.reset()
+        self._seen = False
+
+    def run(self, raw, now, ts, ts_face=None):
+        """-> (hands, face, blendshapes, plan). face is None on non-face frames
+        and when no face is found."""
+        H, W = raw.shape[:2]
+        pw = self.cfg["camera"]["process_width"]
+        self.plan = plan = self.planner.plan(now, self._seen, W / H)
+        rect = plan.rect
+        if rect == FULL:
+            crop = raw
+        else:
+            x, y, w, h = rect_to_px(rect, W, H)
+            crop = raw[y:y + h, x:x + w]
+        ch, cw = crop.shape[:2]
+        proc = crop
+        if cw != pw:
+            proc = cv2.resize(crop, (pw, max(2, int(round(ch * pw / cw)))),
+                              interpolation=cv2.INTER_AREA if cw > pw else cv2.INTER_LINEAR)
+        img = self.det.image(proc)
+        hands = [replace(o, lms=map_landmarks(o.lms, rect)) for o in self.det.hands(img, ts)]
+        self._seen = bool(hands)
+        face, bs = None, None
+        if ts_face is not None:
+            face, bs = self.det.face(img, ts_face)
+            face = map_face(face, rect)
+            if face is not None:
+                self.planner.observe_face(face_geom(face), now)
+        return hands, face, bs, plan
+
+
+
 class VisionThread(threading.Thread):
     def __init__(self, state, cfg, actions):
         super().__init__(daemon=True, name="vision")
@@ -154,6 +206,7 @@ class VisionThread(threading.Thread):
         self.gaze = GazeDetector(cfg)
         self.cam = Camera(cfg)
         self.det = Detectors(cfg)
+        self.pipe = Pipeline(cfg, self.det)
         self.reopen = False
         self.t0 = time.monotonic()
         self.last_ts = -1
@@ -191,6 +244,7 @@ class VisionThread(threading.Thread):
         self.engine.reset()
         self.head.reset()
         self.gaze.reset()
+        self.pipe.reset()
         self.state.update(camera="off", caption="paused", hands=0)
 
     def _no_camera(self):
@@ -222,7 +276,7 @@ class VisionThread(threading.Thread):
                     continue
                 if not was_on:
                     was_on, fails = True, 0
-                    self.engine.reset(); self.head.reset(); self.gaze.reset()
+                    self.engine.reset(); self.head.reset(); self.gaze.reset(); self.pipe.reset()
                     self.state.update(camera="starting", caption="starting")
                 if self.reopen:
                     self.reopen = False
@@ -247,28 +301,33 @@ class VisionThread(threading.Thread):
                 now = time.monotonic()
                 ts = self._ts(now)
                 h, w = frame.shape[:2]
-                img = self.det.image(frame)
-                self.engine.aspect = w / h
-                self.engine.screen = self.actions.bounds()[2:]
-                evs = self.engine.update(self.det.hands(img, ts), now)
-
                 head_lvl = int(self.cfg.get("head_level", 0))
                 eye_on = bool(self.cfg.get("eye_corners"))
-                if (head_lvl > 0 or eye_on) and frame_i % self.cfg["camera"]["face_every"] == 0:
+                ts_f = None
+                if frame_i % self.cfg["camera"]["face_every"] == 0:     # always: the face is the scale reference
                     self.last_ts_f = max(self.last_ts_f + 1, ts)
-                    face, bs = self.det.face(img, self.last_ts_f)
+                    ts_f = self.last_ts_f
+                hands, face, bs, plan = self.pipe.run(frame, now, ts, ts_f)
+                self.engine.aspect = w / h
+                self.engine.screen = self.actions.bounds()[2:]
+                self.engine.union_aspect = self.actions.desktop.aspect()
+                self.engine.union_span = self.actions.desktop.span()
+                if ts_f is not None:
+                    self.engine.observe_face(face_geom(face) if face else None, now)
+                evs = self.engine.update(hands, now)
+                if ts_f is not None:
                     if head_lvl > 0:
                         hev = self.head.update(face, now, head_lvl, self.engine.dragging)
                         for e in hev:
                             self.engine.flash("head · " + {"next_app": "next app", "prev_app": "previous app",
                                                                 "sleep": "sleep"}[e.value], now, 1.0)
                         evs += hev
+                    elif self.head.base is not None:
+                        self.head.reset()
                     if eye_on:
                         evs += self.gaze.update(bs, now)
-                elif not (head_lvl > 0 or eye_on):
-                    if self.head.base is not None:
-                        self.head.reset()
-                    self.gaze.reset()
+                    else:
+                        self.gaze.reset()
                 frame_i += 1
                 self._emit(evs)
                 self.state.update(camera="ok", caption=self.engine.caption(now), hands=len(self.engine.labels))

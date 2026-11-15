@@ -188,6 +188,7 @@ class HandState:
         self.ratio = 9.0
         self.anchor = (0.5, 0.5)
         self.fist_raw = False
+        self.palm_w = 0.08
 
     def update(self, lms, aspect, now):
         L = iso(lms, aspect)
@@ -197,6 +198,7 @@ class HandState:
         self.ratio = pinch_ratio(L)
         self.pinch.update(self.ratio, now, allowed=not self.fist_raw)
         self.anchor = palm_anchor(lms)
+        self.palm_w = max(palm_width(L), 1e-3)
         lab = self.vote.push(self.pose_raw)
         if lab != self.label:
             self.label, self.label_since = lab, now

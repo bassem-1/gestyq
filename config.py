@@ -6,7 +6,7 @@ import threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "config.json")
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 POINTER_NAMES = ["off", "steady", "calm", "brisk", "fast"]
 HEAD_NAMES = ["off", "low", "normal", "high", "max"]
@@ -20,6 +20,7 @@ DEFAULTS = {
     "pointer_speed": 2,           # 0 off, 1 steady, 2 calm, 3 brisk, 4 fast
     "head_level": 2,              # 0 off, 1 low, 2 normal, 3 high, 4 max
     "tiling": True,
+    "dictation": True,            # left fist held = macos dictation
     "dwell_click": False,
     "eye_corners": False,         # beta
     "camera_name": None,          # None = auto (built-in camera)
@@ -29,7 +30,7 @@ DEFAULTS = {
     "launch_at_login": False,
     "gadget_origin": None,        # [x, y] in Cocoa screen coords
     "flip_gaze_x": False,
-    "camera": {"width": 1280, "height": 720, "fps": 30, "process_width": 960, "face_every": 2},
+    "camera": {"width": 1920, "height": 1080, "fps": 30, "process_width": 960, "face_every": 2},
     "hand": {
         "frame_margin_x": 0.15,   # camera sub-rectangle mapped to the whole screen
         "frame_margin_y": 0.15,
@@ -53,16 +54,29 @@ DEFAULTS = {
         "scroll_gain": 1800,      # px per full frame height of hand travel
         "scroll_deadzone": 0.002,
         "scroll_invert": False,
-        "swipe_dist": 0.25,
-        "swipe_time": 0.35,
+        "swipe_dist": 1.6,        # palm widths
+        "swipe_time": 0.45,
+        "swipe_ratio": 2.0,       # |dx| > ratio * |dy|
+        "swipe_flicker": 2,       # frames the palm state may drop out
         "swipe_cooldown": 1.0,
         "tile_window": 0.6,
-        "tile_move": 0.15,
-        "tile_gap": 0.15,
+        "tile_move": 1.5,         # palm widths
+        "tile_gap": 1.5,          # palm widths
         "tile_cooldown": 1.0,
-        "min_detection_conf": 0.6,
-        "min_presence_conf": 0.6,
-        "min_tracking_conf": 0.5,
+        "min_detection_conf": 0.45,   # the voting layer handles the noise
+        "min_presence_conf": 0.45,
+        "min_tracking_conf": 0.4,
+        "dictation_hold": 0.6,    # left fist, s
+        # adaptive zoom + body-relative control box (face width = scale reference)
+        "far_face_frac": 0.16,    # enter zoom below this face width / frame width
+        "near_face_frac": 0.20,   # leave zoom above this
+        "roi_face_widths": 7.0,   # crop width in face widths
+        "roi_tau": 0.3,           # s, EMA of the crop
+        "roi_shift": 0.10,        # move the crop only when the target shifts > 10%
+        "box_face_widths": 4.5,   # control box width in face widths
+        "box_offset_x": 1.2,      # face widths toward the pointer hand's shoulder
+        "box_offset_y": 1.5,      # face widths below the eyes
+        "box_tau": 0.4,           # s, EMA of the control box
     },
     "handedness": {
         "label_weight": 1.0,
@@ -98,6 +112,7 @@ DEFAULTS = {
         "gaze:top-left": "mission_control",
         "gaze:top-right": "notification_center",
         "gaze:bottom-left": "launchpad",
+        "dictation": None,        # fallback action if the Edit menu item is not found
     },
 }
 

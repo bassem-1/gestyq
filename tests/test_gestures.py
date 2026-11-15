@@ -254,3 +254,135 @@ def test_tile_rect_matches_v2():
     assert tile_rect("right", (0, 25, 1440, 875), 900) == (720, 0, 720, 875)
     assert tile_rect("fill", (0, 25, 1440, 875), 900) == (0, 0, 1440, 875)
     assert tile_rect("center", (0, 0, 1000, 1000), 1000) == (200, 200, 600, 600)
+
+
+
+# ---------------------------------------------------------------- v0.4: palm-relative swipe / tiling, dictation
+from gestures import PalmSwipe
+
+
+def _swipe_sim(scale, step, n=8):
+    s = Sim()
+    s.step(None, make_hand("left", x=0.7, y=0.5, scale=scale), n=10)
+    for i in range(n):
+        s.step(None, make_hand("left", x=0.7 - step * i, y=0.5, scale=scale))
+    return s.kinds("space")
+
+
+def test_swipe_is_relative_to_palm_width():
+    assert not _swipe_sim(1.0, 0.015)                    # 0.105 frame = 1.3 palm widths: too short
+    assert len(_swipe_sim(1.0, 0.020)) == 1              # 0.14 = 1.7 palm widths
+    assert len(_swipe_sim(0.4, 0.012)) == 1              # far hand: 0.084 frame but 2.6 palm widths
+    assert not _swipe_sim(0.4, 0.006)                    # far hand moving 1.3 palm widths
+
+
+def test_swipe_must_be_mostly_horizontal_and_survives_palm_flicker():
+    h = cfg()["hand"]
+    sw = PalmSwipe(h)
+    t = 0.0
+    out = []
+    for i in range(8):                                   # diagonal: |dx| < 2|dy|
+        out.append(sw.update(True, 0.5 - 0.02 * i, 0.5 + 0.015 * i, 0.08, t))
+        t += 1 / 30
+    assert not any(out)
+    sw = PalmSwipe(h)
+    t, out = 0.0, []
+    for i in range(10):                                  # 2 dropped frames mid-swipe are tolerated
+        out.append(sw.update(i not in (3, 4), 0.7 - 0.02 * i, 0.5, 0.08, t))
+        t += 1 / 30
+    assert sum(o is not None for o in out) == 1
+    sw = PalmSwipe(h)
+    t, out = 0.0, []
+    for i in range(10):                                  # 3 dropped frames reset the history
+        out.append(sw.update(i not in (2, 3, 4), 0.7 - 0.02 * i, 0.5, 0.08, t))
+        t += 1 / 30
+    assert not any(o is not None for o in out)
+
+
+def test_swipe_cooldown_is_one_second():
+    sw = PalmSwipe(cfg()["hand"])
+    fired, t = [], 0.0
+    for i in range(60):                                  # continuous fast sweep for 2 s
+        r = sw.update(True, 0.9 - 0.02 * i if i < 30 else 0.3 + 0.02 * (i - 30), 0.5, 0.08, t)
+        if r is not None:
+            fired.append(t)
+        t += 1 / 30
+    assert len(fired) >= 2 and all(b - a >= 1.0 - 1e-9 for a, b in zip(fired, fired[1:]))
+
+
+def test_tiling_works_at_distance():
+    def tile(scale, k):
+        s = Sim()
+        r0, l0 = (0.4, 0.55)
+        s.step(make_hand("right", x=r0, scale=scale), make_hand("left", x=l0, scale=scale), n=10)
+        for i in range(1, 11):
+            s.step(make_hand("right", x=r0 - k * i, scale=scale), make_hand("left", x=l0 + k * i, scale=scale))
+        return [e.value for _, e in s.kinds("tile")]
+    assert tile(1.0, 0.03)[:1] == ["fill"]               # spread 0.6 frame
+    assert tile(0.4, 0.012)[:1] == ["fill"]              # far hands: 0.24 frame = 7 palm widths
+    assert not tile(1.0, 0.004)                          # tiny spread at close range
+
+
+def test_left_fist_dictation_once_per_hold_and_rearms():
+    s = Sim()
+    s.step(R(0.4), Lh(), n=10)
+    s.step(R(0.4), Lh(**FIST), n=12)                     # ~0.4 s
+    assert not s.kinds("dictation")
+    s.step(R(0.4), Lh(**FIST), n=30)                     # well past 0.6 s
+    d = s.kinds("dictation")
+    assert len(d) == 1 and d[0][1].pulse
+    s.step(R(0.4), Lh(**FIST), n=60)                     # continued hold: no repeat
+    assert len(s.kinds("dictation")) == 1
+    s.step(R(0.4), Lh(), n=10)                           # open hand re-arms
+    s.step(R(0.4), Lh(**FIST), n=30)
+    assert len(s.kinds("dictation")) == 2
+    off = Sim(dictation=False)
+    off.step(R(0.4), Lh(), n=10)
+    off.step(R(0.4), Lh(**FIST), n=40)
+    assert not off.kinds("dictation")
+    r = Sim()                                            # the RIGHT fist is a drag, never dictation
+    r.step(R(0.4), n=10)
+    r.step(R(0.4, **FIST), n=40)
+    assert not r.kinds("dictation") and r.kinds("drag_start")
+
+
+def test_dictation_caption_flash():
+    s = Sim()
+    s.step(None, Lh(), n=10)
+    for _ in range(30):
+        s.step(None, Lh(**FIST))
+        if s.kinds("dictation"):
+            break
+    assert s.e.caption(s.t) == "left · dictation"
+
+
+def test_body_relative_box_same_arm_travel_covers_screen_at_any_distance():
+    from roi import FaceGeom
+
+    def span(frac):
+        s = Sim()
+        for _ in range(40):
+            s.e.observe_face(FaceGeom(0.5, 0.35, frac), s.t)
+            s.step(R(0.5, y=0.6), n=1)
+        xs = []
+        for x in (0.5 + 1.0 * 4.5 * frac * 0.5, 0.5 - 1.2 * 4.5 * frac * 0.0 - 4.5 * frac * 0.5):
+            for _ in range(25):
+                s.e.observe_face(FaceGeom(0.5, 0.35, frac), s.t)
+                s.step(R(x, y=0.6), n=1)
+            xs.append(s.kinds("move")[-1][1].value[0])
+        return abs(xs[0] - xs[1])
+    near, far = span(0.15), span(0.05)
+    assert near > 0.5 and far > 0.5                 # arm travel scaled by face width gives a similar sweep
+    assert abs(near - far) < 0.35
+
+
+def test_pointer_box_frozen_during_pinch():
+    from roi import FaceGeom
+    s = Sim()
+    s.e.observe_face(FaceGeom(0.5, 0.35, 0.1), 0.0)
+    s.step(R(0.4), n=30)
+    b0 = s.e.pointer.box
+    s.e.observe_face(FaceGeom(0.6, 0.35, 0.05), s.t)          # the person moves while pinching
+    s.step(R(0.4, pinch=1.0), n=3)
+    s.step(R(0.4, pinch=1.0), n=5)
+    assert s.e.pointer.mode == "pinch" and s.e.pointer.box == b0

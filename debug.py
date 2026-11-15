@@ -10,7 +10,8 @@ import cv2
 import config
 from gestures import GestureEngine
 from head import HeadTracker
-from vision import Camera, Detectors, ensure_models
+from roi import FULL, face_geom
+from vision import Camera, Detectors, Pipeline, downscale, ensure_models
 
 CONN = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8), (5, 9), (9, 10), (10, 11), (11, 12),
         (9, 13), (13, 14), (14, 15), (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17)]
@@ -30,26 +31,32 @@ def main():
     cam, det = Camera(cfg), Detectors(cfg)
     if not cam.open():
         raise SystemExit("no camera")
-    engine, head = GestureEngine(cfg), HeadTracker(cfg)
+    engine, head, pipe = GestureEngine(cfg), HeadTracker(cfg), Pipeline(cfg, det)
     t0, last_ts, last_f, i = time.monotonic(), -1, -1, 0
     head_event, head_event_t, face = "", 0.0, None
     fps_t, fps = time.monotonic(), 0.0
     try:
         while True:
-            ok, frame = cam.read()
+            ok, raw = cam.read()
             if not ok:
                 continue
             now = time.monotonic()
             last_ts = max(last_ts + 1, int((now - t0) * 1000))
-            h, w = frame.shape[:2]
-            img = det.image(frame)                       # unmirrored, as in the app
-            engine.aspect = w / h
-            engine.update(det.hands(img, last_ts), now)
+            H0, W0 = raw.shape[:2]
+            ts_f = None
             if i % cfg["camera"]["face_every"] == 0:
                 last_f = max(last_f + 1, last_ts)
-                face, _ = det.face(img, last_f)
+                ts_f = last_f
+            hands, f, _, plan = pipe.run(raw, now, last_ts, ts_f)
+            engine.aspect = W0 / H0
+            if ts_f is not None:
+                face = f
+                engine.observe_face(face_geom(f) if f else None, now)
                 for e in head.update(face, now, cfg["head_level"], engine.dragging):
                     head_event, head_event_t = e.value, now
+            engine.update(hands, now)
+            frame = downscale(raw, cfg["camera"]["process_width"])      # display only
+            h, w = frame.shape[:2]
             i += 1
             view = cv2.flip(frame, 1)                    # display only
             for d in engine.debug:
@@ -65,6 +72,15 @@ def main():
                 put(view, f"fingers {st}  pinch {d['ratio']:.2f}{' ON' if d['pinch'] else ''}", x, y + 18, col)
                 put(view, f"label {engine.labels.get(d['role'])}  mode {engine.pointer.mode if d['role'] == 'right' else ''}",
                     x, y + 36, col)
+            rx, ry, rw, rh = plan.rect                    # ROI (mirrored for display)
+            if plan.rect != FULL:
+                cv2.rectangle(view, (int((1 - rx - rw) * w), int(ry * h)), (int((1 - rx) * w), int((ry + rh) * h)),
+                              (0, 255, 255), 2)
+            bx, by, bw, bh = engine.cbox.box or (0, 0, 0, 0)       # control box (mirrored)
+            cv2.rectangle(view, (int((1 - bx - bw) * w), int(by * h)), (int((1 - bx) * w), int((by + bh) * h)),
+                          (60, 60, 255), 2)
+            put(view, f"face_width_frac {plan.face_frac:.3f}  zoom {'ON' if plan.zoom else 'off'}"
+                      f"  box {'body' if engine.cbox.body(now) else 'fixed'}", 10, h - 30)
             y = 20
             if face is not None:
                 nx, ny = int((1 - face.nose[0]) * w), int(face.nose[1] * h)

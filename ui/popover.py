@@ -20,7 +20,7 @@ class Banner(Flipped):
 
 class PopoverContent(Flipped):
     """`model` provides: cfg, state, set(key, value), set_enabled(bool), trusted, grant_access(),
-    refresh_trust(), cycle_camera(), camera_label(), quit()."""
+    refresh_trust(), cycle_camera(), camera_label(), display_count(), quit()."""
 
     def initWithModel_(self, model):
         self = objc.super(PopoverContent, self).initWithFrame_(NSMakeRect(0, 0, W, 400))
@@ -31,7 +31,6 @@ class PopoverContent(Flipped):
         return self
 
     # -- construction
-    @objc.python_method
     def _row(self, title, control, right_edge=W - PAD):
         row = Row.alloc().initWithWidth_(W)
         t = make_text(title, T.SIZE_TITLE, "fg", h=T.ROW)
@@ -43,7 +42,6 @@ class PopoverContent(Flipped):
         self.addSubview_(row)
         return row
 
-    @objc.python_method
     def _build(self):
         m = self.model
         cfg = m.cfg
@@ -57,16 +55,19 @@ class PopoverContent(Flipped):
             int(cfg[key]), names, lambda lv, k=key: m.set(k, lv))
         sw = lambda key: Switch.alloc().initWithOn_callback_(cfg[key], lambda on, k=key: m.set(k, on))
         self.bar_pointer, self.bar_head = mk("pointer_speed", POINTER_NAMES), mk("head_level", HEAD_NAMES)
-        self.sw = {k: sw(k) for k in ("tiling", "dwell_click", "eye_corners", "swap_hands", "desktop_gadget",
+        self.sw = {k: sw(k) for k in ("tiling", "dictation", "dwell_click", "eye_corners", "swap_hands", "desktop_gadget",
                                        "gadget_floats", "launch_at_login")}
         self.rows_a = [self._row("pointer speed", self.bar_pointer, W - PAD + 3),
                        self._row("head", self.bar_head, W - PAD + 3),
                        self._row("window tiling", self.sw["tiling"]),
+                       self._row("dictation · left fist", self.sw["dictation"]),
                        self._row("dwell click", self.sw["dwell_click"]),
                        self._row("eye corners · beta", self.sw["eye_corners"])]
         self.cam_btn = TextButton.alloc().initWithTitle_size_color_callback_(
             m.camera_label(), T.SIZE_SMALL, "fg2", self._cycle)
+        self.disp_text = make_text(str(m.display_count()), T.SIZE_TITLE, "fg2", w=40, h=T.ROW, right=True)
         self.rows_b = [self._row("camera", self.cam_btn, W - PAD + 6),
+                       self._row("displays", self.disp_text),
                        self._row("swap hands", self.sw["swap_hands"]),
                        self._row("desktop gadget", self.sw["desktop_gadget"]),
                        self._row("gadget floats above windows", self.sw["gadget_floats"]),
@@ -96,19 +97,16 @@ class PopoverContent(Flipped):
         self.banner.addSubview_(self.did_btn)
         self.addSubview_(self.banner)
 
-    @objc.python_method
     def _grant(self):
         self.grant_clicked = True
         self.model.grant_access()
         self.refresh()
 
-    @objc.python_method
     def _cycle(self):
         self.model.cycle_camera()
         self.refresh()
 
     # -- layout / state
-    @objc.python_method
     def refresh(self):
         m, cfg = self.model, self.model.cfg
         on = m.state.get()["enabled"]
@@ -118,6 +116,7 @@ class PopoverContent(Flipped):
         self.bar_head.set_level(int(cfg["head_level"]))
         for k, s in self.sw.items():
             s.set_on(cfg[k])
+        self.disp_text.set_text(str(m.display_count()))
         self.cam_btn.set_title(m.camera_label())
         self.cam_btn.fit(max_w=170)
         self.cam_btn.setFrameOrigin_((W - PAD + 6 - self.cam_btn.frame().size.width, 4))

@@ -44,6 +44,9 @@ class Model:
         self.on_change = lambda: None
         self.quitting = False
 
+    def display_count(self):
+        return self.actions.desktop.count()
+
     def set(self, key, value):
         self.cfg[key] = value
         self.saver.poke()
@@ -102,6 +105,7 @@ class Delegate(NSObject):
         self.model = Model()
         m = self.model
         request_camera_access()
+        m.actions.watch_displays()
         m.vision.start()
         self.gadget = GadgetController(m)
         self.menubar = MenuBar(m)
@@ -125,6 +129,7 @@ class Delegate(NSObject):
 
     def screensChanged_(self, note):
         self.gadget.reclamp()
+        self.model.actions.refresh_displays()
         self.publish_screen()
 
     def changed(self):
@@ -133,10 +138,13 @@ class Delegate(NSObject):
             self.menubar.refresh()
 
     def publish_screen(self):
-        vf = NSScreen.mainScreen().visibleFrame()
+        scr = list(NSScreen.screens())
+        rect = lambda r: (r.origin.x, r.origin.y, r.size.width, r.size.height)
+        main = NSScreen.mainScreen()
         self.model.state.update(screen={
-            "visible": (vf.origin.x, vf.origin.y, vf.size.width, vf.size.height),
-            "primary_h": NSScreen.screens()[0].frame().size.height})
+            "primary_h": scr[0].frame().size.height,
+            "screens": [{"frame": rect(s.frame()), "visible": rect(s.visibleFrame())} for s in scr],
+            "main": next((i for i, s in enumerate(scr) if main is not None and s == main), 0)})
 
     def tick_(self, timer):
         now = time.monotonic()
@@ -153,7 +161,7 @@ class Delegate(NSObject):
         self.last_pulse = snap["pulse_n"]
         self.gadget.update(on, snap["caption"] if on else "paused", pulsed)
         self.menubar.set_enabled(on)
-        key = (on, m.trusted)
+        key = (on, m.trusted, m.display_count())
         if key != self.last_snap:
             self.last_snap = key
             if self.menubar.is_open:

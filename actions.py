@@ -9,12 +9,13 @@ import time
 
 import Quartz
 
+from desktop import Desktop, parse_rect, pick_visible
 from gestures import tile_rect
+from keys import chord_plan, dictation_script, front_window_script, osa_chord_script
 
 # virtual key codes
 K_TAB, K_LEFT, K_RIGHT, K_DOWN, K_UP, K_F11 = 48, 123, 124, 125, 126, 103
-MODS = {"control": Quartz.kCGEventFlagMaskControl, "command": Quartz.kCGEventFlagMaskCommand,
-        "option": Quartz.kCGEventFlagMaskAlternate, "shift": Quartz.kCGEventFlagMaskShift}
+CHORD_GAP = 0.012
 BUILTIN = {
     "mission_control": "key:126:control",
     "show_desktop": "key:103",
@@ -45,25 +46,65 @@ def _osa(script):
         pass
 
 
+def _osa_out(script, timeout=3.0):
+    try:
+        r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def query_displays():
+    """Active displays as global CG rects [(x, y, w, h)]."""
+    err, ids, n = Quartz.CGGetActiveDisplayList(16, None, None)
+    rects = []
+    for d in list(ids or [])[:n]:
+        r = Quartz.CGDisplayBounds(d)
+        rects.append((r.origin.x, r.origin.y, r.size.width, r.size.height))
+    if not rects:
+        r = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
+        rects = [(r.origin.x, r.origin.y, r.size.width, r.size.height)]
+    return rects
+
+
 class Actions:
     def __init__(self, cfg, state):
         self.cfg, self.state = cfg, state
         self.lock = threading.RLock()
         self.dragging = False
         self.last = None
-        self._b, self._bt = None, 0.0
+        self.desktop = Desktop(query_displays())
+        self._poll_t = 0.0
 
-    # -- geometry
+    # -- geometry (multi-display)
+    def refresh_displays(self):
+        """Any thread. -> True when the layout changed."""
+        try:
+            return self.desktop.set(query_displays())
+        except Exception as e:
+            print("display query failed:", e)
+            return False
+
+    def watch_displays(self):
+        """Main thread: CG reconfiguration callback (the 2 s poll in bounds() is the fallback)."""
+        def cb(display, flags, info):
+            if not flags & Quartz.kCGDisplayBeginConfigurationFlag:
+                self.refresh_displays()
+        self._cb = cb                                   # keep alive
+        try:
+            Quartz.CGDisplayRegisterReconfigurationCallback(cb, None)
+        except Exception as e:
+            print("display callback unavailable:", e)
+
     def bounds(self):
         now = time.monotonic()
-        if self._b is None or now - self._bt > 2.0:
-            r = Quartz.CGDisplayBounds(Quartz.CGMainDisplayID())
-            self._b, self._bt = (r.origin.x, r.origin.y, r.size.width, r.size.height), now
-        return self._b
+        if now - self._poll_t > 2.0:
+            self._poll_t = now
+            self.refresh_displays()
+        return self.desktop.bounds()
 
     def to_px(self, nx, ny):
-        x, y, w, h = self.bounds()
-        return (x + nx * (w - 1), y + ny * (h - 1))
+        return self.desktop.to_px(nx, ny)
 
     def location(self):
         loc = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
@@ -110,35 +151,48 @@ class Actions:
                 self.dragging = False
 
     # -- keys / scroll
-    def key(self, code, flags=0):
-        for down in (True, False):
-            ev = Quartz.CGEventCreateKeyboardEvent(None, code, down)
+    def chord(self, code, mods=()):
+        """Explicit modifier downs -> key down/up -> modifier ups, ~12 ms apart, HID event source."""
+        if not is_trusted():
+            _osa(osa_chord_script(code, mods))
+            return
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        for c, down, flags, is_mod in chord_plan(code, mods):
+            ev = Quartz.CGEventCreateKeyboardEvent(src, c, down)
+            if is_mod:
+                Quartz.CGEventSetType(ev, Quartz.kCGEventFlagsChanged)
             Quartz.CGEventSetFlags(ev, flags)
-            self._post(ev)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            time.sleep(CHORD_GAP)
 
     def scroll(self, dy):
         ev = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitPixel, 1, int(dy))
         self._post(ev)
 
     def run_action(self, spec):
+        if not spec:
+            return
         spec = BUILTIN.get(spec, spec)
         if spec.startswith("key:"):
             parts = spec.split(":")
-            flags = 0
-            for m in (parts[2].split(",") if len(parts) > 2 else []):
-                flags |= MODS.get(m, 0)
-            self.key(int(parts[1]), flags)
+            self.chord(int(parts[1]), parts[2].split(",") if len(parts) > 2 else [])
         elif spec.startswith("shell:"):
             subprocess.Popen(spec[6:], shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         elif spec.startswith("script:"):
             _osa(spec[7:])
 
-    # -- tiling (osascript, as v2)
+    # -- tiling (osascript): within the display holding the front window
     def tile(self, mode):
         scr = self.state.get().get("screen")
-        if not scr:
+        if scr:
+            threading.Thread(target=self._tile, args=(mode, scr), daemon=True).start()
+
+    def _tile(self, mode, scr):
+        vis = pick_visible(parse_rect(_osa_out(front_window_script())), scr["screens"], scr["primary_h"],
+                           scr.get("main", 0))
+        if not vis:
             return
-        x, y, w, h = tile_rect(mode, scr["visible"], scr["primary_h"])
+        x, y, w, h = tile_rect(mode, vis, scr["primary_h"])
         _osa(f'''tell application "System Events"
   set p to first application process whose frontmost is true
   try
@@ -147,6 +201,14 @@ class Actions:
     set position of front window of p to {{{x}, {y}}}
   end try
 end tell''')
+
+    # -- dictation
+    def dictation(self):
+        threading.Thread(target=self._dictation, daemon=True).start()
+
+    def _dictation(self):
+        if _osa_out(dictation_script(), 4.0) != "ok":
+            self.run_action(self.cfg.get("actions", {}).get("dictation"))
 
     # -- dispatch
     def execute(self, ev):
@@ -175,14 +237,16 @@ end tell''')
                 elif k == "scroll":
                     self.scroll(v)
                 elif k == "space":
-                    self.key(K_RIGHT if v == "right" else K_LEFT, MODS["control"])
+                    self.chord(K_RIGHT if v == "right" else K_LEFT, ["control"])
                 elif k == "tile":
                     self.tile(v)
+                elif k == "dictation":
+                    self.dictation()
                 elif k == "head":
                     if v == "next_app":
-                        self.key(K_TAB, MODS["command"])
+                        self.chord(K_TAB, ["command"])
                     elif v == "prev_app":
-                        self.key(K_TAB, MODS["command"] | MODS["shift"])
+                        self.chord(K_TAB, ["command", "shift"])
                     elif v == "sleep":
                         subprocess.Popen(["pmset", "displaysleepnow"], stdout=subprocess.DEVNULL,
                                          stderr=subprocess.DEVNULL)

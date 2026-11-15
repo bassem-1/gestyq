@@ -3,6 +3,7 @@ import math
 from collections import deque
 
 from config import POINTER_SCALE
+from desktop import ControlBox, cocoa_to_topleft, margin_box
 from events import Event
 from filters import DeadZone, OneEuro, OneEuro2D, RingBuffer, clamp
 from tracking import HandState, HandTracker
@@ -13,8 +14,8 @@ REF = 1000.0   # filters work in 1/1000-screen units so cutoffs/beta are resolut
 def tile_rect(mode, visible, primary_h):
     """visible = Cocoa (x, y, w, h) with bottom-left origin; returns top-left-origin (x, y, w, h)
     as used by System Events."""
-    vx, vy, vw, vh = visible
-    top = primary_h - (vy + vh)
+    vx, _, vw, vh = visible
+    top = cocoa_to_topleft(visible, primary_h)[1]
     if mode == "left":
         r = (vx, top, vw / 2, vh)
     elif mode == "right":
@@ -50,6 +51,7 @@ class PointerHand:
         self.filt = OneEuro2D(self.h["min_cutoff"], self.h["beta"])
         self.dead = DeadZone(self.h["deadzone"])
         self.buf = RingBuffer(self.h["buffer_window"])
+        self.box = margin_box(self.h, 16 / 9, 16 / 9)     # (x0, y0, w, h) in the UNMIRRORED frame
         self.reset()
 
     def reset(self):
@@ -68,10 +70,9 @@ class PointerHand:
         return self.mode == "drag"
 
     def map(self, ax, ay):
-        h = self.h
-        mx, my = h["frame_margin_x"], h["frame_margin_y"]
-        return (clamp((1.0 - ax - mx) / (1 - 2 * mx)),      # x mirrored
-                clamp((ay - my) / (1 - 2 * my)))
+        x0, y0, w, h = self.box
+        return (clamp((x0 + w - ax) / w),                   # x mirrored
+                clamp((ay - y0) / h))
 
     def _move(self, pos, ev, kind="move"):
         if kind == "move" and self.sent is not None and abs(pos[0] - self.sent[0]) < 1e-6 \
@@ -158,12 +159,53 @@ class PointerHand:
             self.last_click = -1e9
 
 
+class PalmSwipe:
+    """Fast sideways open-palm motion, measured in PALM WIDTHS (distance independent). The palm state
+    may flicker for up to `swipe_flicker` frames. Returns dx (frame widths, mirrored x) or None."""
+
+    def __init__(self, h):
+        self.h = h
+        self.reset()
+
+    def reset(self):
+        self.hist = deque()
+        self.miss = 0
+        self.last = -1e9
+
+    def update(self, active, x, y, pw, now, veto=None):
+        h = self.h
+        if active:
+            self.miss = 0
+            self.hist.append((now, x, y, pw))
+        else:
+            self.miss += 1
+            if self.miss > h["swipe_flicker"]:
+                self.hist.clear()
+                return None
+        while self.hist and now - self.hist[0][0] > h["swipe_time"]:
+            self.hist.popleft()
+        if not active or len(self.hist) < 2 or now - self.last < h["swipe_cooldown"]:
+            return None
+        _, x1, y1, _ = self.hist[-1]
+        pw = max(sum(p[3] for p in self.hist) / len(self.hist), 1e-3)
+        for t0, x0, y0, _ in list(self.hist)[:-1]:
+            dx, dy = x1 - x0, y1 - y0
+            if abs(dx) >= h["swipe_dist"] * pw and abs(dx) > h["swipe_ratio"] * abs(dy) \
+                    and not (veto and veto(dx, t0, now)):
+                self.last = now
+                self.hist.clear()
+                return dx
+        return None
+
+
 class CommandHand:
-    """Left hand: pinch = right click, two-finger vertical = scroll, fast open-palm swipe = space."""
+    """Left hand: pinch = right click, two-finger vertical = scroll, fast open-palm swipe = space,
+    fist held = dictation."""
 
     def __init__(self, cfg):
         self.cfg, self.h = cfg, cfg["hand"]
         self.fy = OneEuro(1.5, 0.01)
+        self.swipe = PalmSwipe(self.h)
         self.reset()
 
     def reset(self):
@@ -172,11 +214,12 @@ class CommandHand:
         self.prev_y = None
         self.acc = 0.0
         self.last_scroll = -1e9
-        self.swipe = deque()
-        self.swipe_last = -1e9
+        self.swipe.reset()
         self.scrolling = False
+        self.fist_t = None
+        self.dict_armed = True
 
-    def step(self, hs, now, ev, cursor, veto_swipe):
+    def step(self, hs, now, ev, cursor, veto_swipe, aspect=16 / 9):
         h = self.h
         pn, label = hs.pinch, hs.label
         if pn.confirmed:
@@ -202,23 +245,24 @@ class CommandHand:
         else:
             self.prev_y, self.acc = None, 0.0
             self.fy.reset()
-        # swipe
-        x = 1.0 - hs.anchor[0]
-        y = hs.anchor[1]
-        if label == "open" and not pn.raw:
-            self.swipe.append((now, x, y))
-            while self.swipe and now - self.swipe[0][0] > h["swipe_time"]:
-                self.swipe.popleft()
-            t0, x0, y0 = self.swipe[0]
-            dx, dy = x - x0, y - y0
-            if (now - self.swipe_last >= h["swipe_cooldown"] and abs(dx) >= h["swipe_dist"]
-                    and abs(dy) < 0.5 * abs(dx) and not veto_swipe(dx, t0, now)):
-                self.swipe_last = now
-                self.swipe.clear()
-                # hand moves to the user's left -> next space (trackpad convention)
-                ev.append(Event("space", "right" if dx < 0 else "left", pulse=True))
+        # swipe (palm-width relative)
+        dx = self.swipe.update(label == "open" and not pn.raw, 1.0 - hs.anchor[0], hs.anchor[1] / aspect,
+                               hs.palm_w, now, veto_swipe)
+        if dx is not None:
+            # hand moves to the user's left -> next space (trackpad convention)
+            ev.append(Event("space", "right" if dx < 0 else "left", pulse=True))
+        # dictation: fist held, once per hold, re-armed by an open hand
+        if label == "fist":
+            if self.fist_t is None:
+                self.fist_t = now
+            if (self.dict_armed and now - self.fist_t >= h["dictation_hold"]
+                    and self.cfg.get("dictation", True)):
+                self.dict_armed = False
+                ev.append(Event("dictation", pulse=True))
         else:
-            self.swipe.clear()
+            self.fist_t = None
+            if label == "open":
+                self.dict_armed = True
 
     def lost(self):
         self.reset()
@@ -233,7 +277,10 @@ class GestureEngine:
         self.pointer = PointerHand(cfg)
         self.command = CommandHand(cfg)
         self.screen = screen
-        self.aspect = 16 / 9
+        self.aspect = 16 / 9             # camera frame width / height
+        self.union_aspect = 16 / 9       # desktop (all displays) width / height
+        self.union_span = 1.0            # desktop width / reference display width
+        self.cbox = ControlBox(self.h)
         self.tile_hist = deque()
         self.tile_last = -1e9
         self.xr_hist = deque()
@@ -248,9 +295,14 @@ class GestureEngine:
         self.last_seen = {"right": -1e9, "left": -1e9}
         self.pointer.reset()
         self.command.reset()
+        self.cbox.reset()
         self.tile_hist.clear()
         self.xr_hist.clear()
         self.debug, self.labels = [], {}
+
+    def observe_face(self, geom, now):
+        """geom: roi.FaceGeom in full-frame coords (or None). Feeds the body-relative control box."""
+        self.cbox.observe_face(geom, now)
 
     @property
     def dragging(self):
@@ -298,6 +350,11 @@ class GestureEngine:
         speed = int(cfg.get("pointer_speed", 2))
         # right hand = pointer
         if "right" in by and speed > 0:
+            rs = self.states["right"]
+            frozen = self.pointer.mode != "move" or rs.pinch.raw or rs.fist_raw
+            self.pointer.box = self.cbox.update(now, frozen, self.union_aspect,
+                                                self.aspect, -1 if cfg.get("swap_hands") else 1,
+                                                self.union_span)
             self.pointer.step(self.states["right"], now, ev, self.screen,
                               POINTER_SCALE.get(speed, 1.0), bool(cfg.get("dwell_click")))
             r = self.states["right"]
@@ -310,13 +367,13 @@ class GestureEngine:
             self.xr_hist.clear()
         # left hand = commands
         if "left" in by:
-            self.command.step(self.states["left"], now, ev, self.pointer.cur, self._veto_swipe(now))
+            self.command.step(self.states["left"], now, ev, self.pointer.cur, self._veto_swipe(now), self.aspect)
         elif now - self.last_seen["left"] > h["loss_grace"]:
             self.command.lost()
         # both palms open -> tiling
         if (cfg.get("tiling", True) and "right" in by and "left" in by
                 and self.labels["right"] == "open" and self.labels["left"] == "open"):
-            self._tile(self.states["right"].anchor, self.states["left"].anchor, now, ev)
+            self._tile(self.states["right"], self.states["left"], now, ev)
         else:
             self.tile_hist.clear()
         for e in ev:
@@ -326,22 +383,25 @@ class GestureEngine:
                 self.flash("left · right click", now, 0.5)
             elif e.kind == "drag_start":
                 self.flash("right · drag", now, 0.3)
+            elif e.kind == "dictation":
+                self.flash("left · dictation", now, 0.8)
             elif e.kind == "space":
                 self.flash("left · space " + e.value, now, 0.8)
         return ev
 
-    def _tile(self, right, left, now, ev):
+    def _tile(self, rs, ls, now, ev):
         c = self.h
-        xr, xl = 1 - right[0], 1 - left[0]
-        self.tile_hist.append((now, (xr + xl) / 2, abs(xr - xl)))
+        xr, xl = 1 - rs.anchor[0], 1 - ls.anchor[0]
+        self.tile_hist.append((now, (xr + xl) / 2, abs(xr - xl), (rs.palm_w + ls.palm_w) / 2))
         while self.tile_hist and now - self.tile_hist[0][0] > c["tile_window"]:
             self.tile_hist.popleft()
         if now - self.tile_last < c["tile_cooldown"] or len(self.tile_hist) < 2:
             return
+        pw = max(sum(p[3] for p in self.tile_hist) / len(self.tile_hist), 1e-3)     # palm widths
         dcx = self.tile_hist[-1][1] - self.tile_hist[0][1]
         dgap = self.tile_hist[-1][2] - self.tile_hist[0][2]
-        cands = [("left", -dcx / c["tile_move"]), ("right", dcx / c["tile_move"]),
-                 ("fill", dgap / c["tile_gap"]), ("center", -dgap / c["tile_gap"])]
+        mv, gp = c["tile_move"] * pw, c["tile_gap"] * pw
+        cands = [("left", -dcx / mv), ("right", dcx / mv), ("fill", dgap / gp), ("center", -dgap / gp)]
         mode, score = max(cands, key=lambda t: t[1])
         if score >= 1.0:
             ev.append(Event("tile", mode, pulse=True))
