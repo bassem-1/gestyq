@@ -192,6 +192,11 @@ class CommandHand:
         self.last_scroll = -1e9
         self.swipe = deque()
         self.swipe_last = -1e9
+        self.open_t = -1e9            # last frame with a confident open palm
+        self.prev_x = None
+        self.trace = deque()          # (t, x, y, label, confident_open) for the swipe diagnostic log
+        self.trace_last = -1e9
+        self.why = ""
 
     def step(self, hs, now, ev, cursor, veto_swipe):
         h = self.h
@@ -221,25 +226,63 @@ class CommandHand:
         else:
             self.prev_y, self.acc = None, 0.0
             self.fy.reset()
-        # swipe: only from a confident open palm (never right after a two-finger pose)
+        # swipe: starts from a confident open palm; once started it survives blurred / mislabelled frames
+        # for swipe_grace s (fast swipes blur and lose the open label), but not a fist, two fingers or a pinch
         x = 1.0 - hs.anchor[0]
         y = hs.anchor[1]
-        if hs.confident_open(now) and not pn.raw:
+        if hs.confident_open(now):
+            self.open_t = now
+        blocked = (label in ("fist", "scroll") or pn.confirmed
+                   or now - hs.scroll_seen <= h.get("scroll_veto", 0.6))    # raw two-finger frames too
+        px = self.prev_x if self.prev_x is not None else x
+        still = abs(x - px) < 0.004                 # blur only happens while moving fast
+        self.prev_x = x
+        if blocked or (still and not hs.confident_open(now)):
+            self.open_t = -1e9        # fist / two fingers / pinch / a held non-open pose cancel a swipe
+        if not blocked and now - self.open_t <= h.get("swipe_grace", 0.3):
             self.swipe.append((now, x, y))
             while self.swipe and now - self.swipe[0][0] > h["swipe_time"]:
                 self.swipe.popleft()
             t0, x0, y0 = self.swipe[0]
             dx, dy = x - x0, y - y0
-            if (now - self.swipe_last >= h["swipe_cooldown"] and abs(dx) >= h["swipe_dist"]
-                    and abs(dy) < 0.5 * abs(dx) and not veto_swipe(dx, t0, now)):
-                # hand moves to the user's left (dx < 0 in mirrored x) = swipe_left
-                gid = "swipe_left" if dx < 0 else "swipe_right"
-                self.swipe.clear()
-                if act(gid) != "none":
-                    self.swipe_last = now
-                    ev.append(Event("gesture", {"id": gid, "pos": None}, pulse=True))
+            if abs(dx) >= h["swipe_dist"]:
+                if now - self.swipe_last < h["swipe_cooldown"]:
+                    self.why = "cooldown"
+                elif abs(dy) >= 0.5 * abs(dx):
+                    self.why = "too vertical"
+                elif veto_swipe(dx, t0, now):
+                    self.why = "vetoed: right hand moving too"
+                else:
+                    # hand moves to the user's left (dx < 0 in mirrored x) = swipe_left
+                    gid = "swipe_left" if dx < 0 else "swipe_right"
+                    self.swipe.clear()
+                    self.why = "fired " + gid
+                    if act(gid) != "none":
+                        self.swipe_last = now
+                        ev.append(Event("gesture", {"id": gid, "pos": None}, pulse=True))
         else:
+            if self.swipe:
+                self.why = f"swipe dropped (label={label}, pinch={pn.confirmed})"
             self.swipe.clear()
+
+    def _trace(self, now, x, y, hs):
+        """Diagnostic: log one line per clear sideways hand movement saying what the engine saw."""
+        self.trace.append((now, x, y, hs.label, hs.confident_open(now)))
+        while self.trace and now - self.trace[0][0] > 0.6:
+            self.trace.popleft()
+        if now - self.trace_last < 0.8 or len(self.trace) < 3:
+            return
+        xs = [p[1] for p in self.trace]
+        lo, hi = xs.index(min(xs)), xs.index(max(xs))
+        dx = xs[hi] - xs[lo] if hi > lo else xs[lo] - xs[hi]      # signed: + = toward the user's right
+        if abs(dx) < 0.12:
+            return
+        self.trace_last = now
+        labels = "".join({"open": "O", "scroll": "2", "point": "1", "fist": "F", "other": "?"}.get(p[3], "-")
+                         + ("" if p[4] else "'") for p in self.trace)
+        print(f"swipe-trace {'right' if dx > 0 else 'left'} dx={dx:+.2f} frames={len(self.trace)} "
+              f"labels={labels} last={self.why or '-'}", flush=True)
+        self.why = ""
 
     def lost(self):
         self.reset()
@@ -344,6 +387,10 @@ class GestureEngine:
                                "pose_raw": st.pose_raw, "reach": dict(st.reach),
                                "pinch": st.pinch.confirmed, "pinch_raw": st.pinch.raw,
                                "anchor": st.anchor, "lms": t.obs.lms})
+        roles = tuple(sorted((r, round(1 - self.states[r].anchor[0], 2)) for r in by))
+        if tuple(r for r, _ in roles) != getattr(self, "_roles_seen", None):
+            self._roles_seen = tuple(r for r, _ in roles)
+            print(f"roles-trace {' '.join(f'{r}@x={x}' for r, x in roles) or 'none'}", flush=True)
         speed = int(cfg.get("pointer_speed", 2))
         # right hand = pointer
         if "right" in by and speed > 0:

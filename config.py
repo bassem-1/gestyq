@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "config.json")          # shipped defaults, never written by the app
 USER_PATH = os.path.expanduser("~/Library/Application Support/gestyq/config.json")
 VERSION = "0.3.0"
-CONFIG_VERSION = 3
+CONFIG_VERSION = 4
 
 
 def user_path():
@@ -72,9 +72,10 @@ DEFAULTS = {
         "scroll_gain": 3000,      # px per full frame height of hand travel (10 cm is about a page)
         "scroll_deadzone": 0.0008,
         "scroll_invert": False,
-        "swipe_dist": 0.18,       # fraction of frame width ...
-        "swipe_time": 0.45,       # ... within this many s (0.25 in 0.35 s was faster than a natural swipe)
-        "swipe_cooldown": 1.0,
+        "swipe_dist": 0.12,       # fraction of frame width ... (real swipes measured 0.12-0.2)
+        "swipe_time": 0.5,        # ... within this many s
+        "swipe_cooldown": 0.7,
+        "swipe_grace": 0.3,       # s a swipe survives blurred / non-open frames after a confident open palm
         "tile_window": 0.6,
         "tile_move": 0.15,
         "tile_gap": 0.15,
@@ -134,7 +135,7 @@ def _merge(base, over):
 # must not pin the new default (the app used to write its whole config).
 LEGACY_DEFAULTS = {"hand": {"ext_deg": 160.0, "curl_deg": 110.0, "vote_frames": 5, "pinch_on": 0.25,
                             "pinch_off": 0.40, "scroll_gain": 1800, "scroll_deadzone": 0.002,
-                            "swipe_dist": 0.25, "swipe_time": 0.35,
+                            "swipe_dist": (0.25, 0.18), "swipe_time": (0.35, 0.45), "swipe_cooldown": 1.0,
                             "min_detection_conf": 0.6, "min_presence_conf": 0.6}}
 
 
@@ -144,7 +145,8 @@ def _upgrade(raw):
     if raw.get("config_version", 1) < CONFIG_VERSION:
         for sec, old in LEGACY_DEFAULTS.items():
             for k, v in old.items():
-                if isinstance(raw.get(sec), dict) and raw[sec].get(k) == v:
+                olds = v if isinstance(v, tuple) else (v,)          # every default a key ever shipped with
+                if isinstance(raw.get(sec), dict) and k in raw[sec] and raw[sec][k] in olds:
                     del raw[sec][k]
         raw["config_version"] = CONFIG_VERSION
     actions = raw.pop("actions", None)             # v0.3 gaze map "gaze:top-left" -> action

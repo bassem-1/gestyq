@@ -179,7 +179,17 @@ def test_old_hand_defaults_are_dropped_on_load(tmp_path):
         "pinch_on": 0.2}}))
     h = config.load(str(p))["hand"]
     assert h["min_detection_conf"] == 0.7 and h["min_presence_conf"] == 0.7
-    assert h["swipe_dist"] == 0.18 and h["swipe_time"] == 0.45 and h["pinch_on"] == 0.2
+    d = config.DEFAULTS["hand"]
+    assert h["swipe_dist"] == d["swipe_dist"] and h["swipe_time"] == d["swipe_time"] and h["pinch_on"] == 0.2
+
+
+def test_every_old_swipe_default_is_dropped(tmp_path):
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps({"config_version": 3, "hand": {"swipe_dist": 0.18, "swipe_time": 0.45,
+                                                           "swipe_cooldown": 1.0}}))
+    h, d = config.load(str(p))["hand"], config.DEFAULTS["hand"]
+    assert (h["swipe_dist"], h["swipe_time"], h["swipe_cooldown"]) == (d["swipe_dist"], d["swipe_time"],
+                                                                       d["swipe_cooldown"])
 
 
 def test_customised_detection_conf_survives_upgrade(tmp_path):

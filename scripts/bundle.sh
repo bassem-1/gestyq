@@ -28,6 +28,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 clang -O2 -Wall -mmacosx-version-min=12.0 -arch "$ARCH" \
   -L"$LIBDIR" -l"$LIBNAME" -Wl,-rpath,"$LIBDIR" \
   -o "$APP/Contents/MacOS/gestyq" "$ROOT/launcher/main.c"
+"$PY" "$ROOT/scripts/make_icon.py" "$APP/Contents/Resources/AppIcon.icns"
 printf '%s\n' "$ROOT" > "$APP/Contents/Resources/source_dir"
 printf '%s\n' "$PYHOME" > "$APP/Contents/Resources/python_home"
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -39,6 +40,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>gestyq</string>
     <key>CFBundleIdentifier</key><string>io.github.bassem-1.gestyq</string>
     <key>CFBundleExecutable</key><string>gestyq</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>

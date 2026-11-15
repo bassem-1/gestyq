@@ -314,10 +314,10 @@ def test_scroll_pose_never_swipes_or_tiles():
     for i in range(1, 10):                              # left hand goes two-finger and both sweep
         s.step(R(0.3 + 0.04 * i), Lh(0.6 + 0.04 * i, curl=PEACE))
     assert not [1 for _, e in s.log if e.kind == "gesture"]
-    s = Sim()                                           # open -> peace right before a fast move
-    s.step(None, Lh(0.7), n=10)
+    s = Sim()                                           # two fingers (read as scroll) -> open -> fast move
+    s.step(None, Lh(0.7, curl=PEACE), n=6)
     for i in range(10):
-        s.step(None, Lh(0.7 - 0.045 * i, curl=PEACE if i < 3 else (0, 0, 0, 0)))   # peace, then open mid-swipe
+        s.step(None, Lh(0.7 - 0.045 * i))               # within scroll_veto: must not swipe
     assert not s.gest("swipe_left") and not s.gest("swipe_right")
 
 
@@ -445,3 +445,22 @@ def test_face_box_expires_after_half_a_second():
     for i in range(8):
         e.update([obs(make_hand("right", x=0.5, y=0.5, scale=0.8), "Left")], 1.0 + i / 30)
     assert e.labels == {"right": "open"}
+
+
+def test_swipe_survives_blurred_frames_mid_motion():
+    """Real swipes (gestyq.log traces) lose the open label for a few blurred frames mid-motion."""
+    s = Sim()
+    s.step(None, Lh(0.7), n=10)
+    for i in range(10):
+        blur = (0.5, 0.5, 0.5, 0.5) if 2 <= i <= 4 else (0, 0, 0, 0)
+        s.step(None, Lh(0.7 - 0.02 * i, curl=blur))
+    assert len(s.gest("swipe_right")) == 1
+
+
+def test_short_natural_swipe_fires():
+    """Measured swipes cover 0.12-0.2 of the frame in ~0.4 s."""
+    s = Sim()
+    s.step(None, Lh(0.5), n=10)
+    for i in range(12):
+        s.step(None, Lh(0.5 + 0.012 * i))       # 0.13 toward image-right = user's left, in 0.4 s
+    assert len(s.gest("swipe_left")) == 1 and not s.gest("swipe_right")

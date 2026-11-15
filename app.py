@@ -8,7 +8,7 @@ import sys
 import time
 
 import objc
-from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSApplicationDidChangeScreenParametersNotification,
+from AppKit import (NSImage, NSApplication, NSApplicationActivationPolicyAccessory, NSApplicationDidChangeScreenParametersNotification,
                     NSMenu, NSMenuItem, NSObject, NSScreen)
 from Foundation import NSNotificationCenter, NSRunLoop, NSRunLoopCommonModes, NSTimer
 
@@ -228,6 +228,10 @@ class Delegate(NSObject):
 def main():
     app = NSApplication.sharedApplication()
     app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    # dock / app-switcher icon at runtime, so a new icon never needs a re-signed bundle
+    icon = NSImage.alloc().initWithContentsOfFile_(os.path.join(HERE, "Resources", "AppIcon.icns"))
+    if icon is not None:
+        app.setApplicationIconImage_(icon)
     d = Delegate.alloc().init()
     app.setDelegate_(d)
     app.run()
