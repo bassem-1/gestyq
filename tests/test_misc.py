@@ -159,7 +159,7 @@ def test_no_overlay_and_no_pyautogui_anywhere():
 
 def test_pure_modules_have_no_platform_imports():
     pure = ["bindings", "filters", "tracking", "gestures", "head", "gaze", "events", "config", "state", "login",
-            "desktop", "roi", "preview", "wake"]
+            "desktop", "roi", "preview", "wake", "ink", "letters", "recognizer", "textfocus"]
     banned = ("cv2", "mediapipe", "AppKit", "Quartz", "Foundation", "objc", "AVFoundation", "ApplicationServices")
     for m in pure:
         tree = ast.parse(open(os.path.join(ROOT, m + ".py")).read())

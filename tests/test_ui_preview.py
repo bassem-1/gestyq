@@ -213,3 +213,38 @@ def test_asleep_display_blocks_blind_actions_but_hands_wake_it():
     a.asleep, v.asleep_t = True, -1e9
     v._wake(40.0, hand(0.8), [])
     assert a.woke == 3
+
+
+# ---------------------------------------------------------------- air-writing canvas (AppKit; skips elsewhere)
+def test_canvas_view_draws_every_state_and_the_panel_never_takes_focus():
+    pytest.importorskip("AppKit")
+    import time
+    from AppKit import NSApplication
+    NSApplication.sharedApplication()
+    from ui.canvas import CanvasPanel, CanvasView
+    now = time.monotonic()
+    line = ((0.0, 0.0), (0.5, -0.5), (1.0, 0.0), (1.0, 1.0))
+    base = {"n": 1, "strokes": (), "tip": (0.0, 0.0), "pen": False, "hand": True, "armed": True, "result": None,
+            "typed": "hel lo"}
+    res = lambda **k: {"t": now, "char": "g", "alt": None, "why": "", "strokes": (line,), **k}
+    states = [None, base, dict(base, armed=False), dict(base, hand=False, tip=None),
+              dict(base, strokes=(line, line[:2]), pen=True), dict(base, strokes=(((0, 0), (9, 9)),)),
+              dict(base, result=res(alt="q")), dict(base, result=res(char=None, why="reject")),
+              dict(base, result=res(char=None, why="small", strokes=())), dict(base, strokes=((( 0.0, 0.0),),))]
+    for st in states:
+        v = CanvasView.alloc().initWithScale_(48.0)
+        v.set_snap(st, now)
+        rep = v.render()
+        assert rep.pixelsWide() == 640 and rep.pixelsHigh() == 400
+    p = CanvasPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        ((0, 0), (320, 200)), 0, 2, False)
+    assert p.canBecomeKeyWindow() is False and p.canBecomeMainWindow() is False
+    from ui.canvas import CanvasController
+
+    class M:
+        cfg = {"write": {"ink_scale": 48}}
+    c = CanvasController(M())
+    panel = c._make()
+    assert panel.ignoresMouseEvents() is True and panel.canBecomeKeyWindow() is False
+    assert panel.styleMask() & 128                                   # NSWindowStyleMaskNonactivatingPanel
+    assert panel.hidesOnDeactivate() is False and panel.hasShadow() is False

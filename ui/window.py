@@ -18,6 +18,7 @@ from .widgets import Flipped, Switch, TextButton, text_width
 
 WIN_W, WIN_H = 960, 640
 TOP = 44
+WRITE_X = 622                    # "air writing" switch in the settings strip
 FOOT = 40                      # settings strip along the bottom
 BODY_H = WIN_H - TOP - 1 - FOOT
 
@@ -52,6 +53,9 @@ class Root(Flipped):
         self.corners = Switch.alloc().initWithOn_callback_(True, lambda on: model.set("hot_corners", bool(on)))
         self.corners.setFrameOrigin_((WIN_W / 2 + 96, WIN_H - FOOT + 11))
         self.addSubview_(self.corners)
+        self.writing = Switch.alloc().initWithOn_callback_(True, model.set_write_enabled)
+        self.writing.setFrameOrigin_((WRITE_X + 76, WIN_H - FOOT + 11))
+        self.addSubview_(self.writing)
         self.mode_now = None
         return self
 
@@ -65,6 +69,7 @@ class Root(Flipped):
                 b.setNeedsDisplay_(True)
             self.setNeedsDisplayInRect_(NSMakeRect(0, WIN_H - FOOT, WIN_W, FOOT))
         self.corners.set_on(bool(cfg.get("hot_corners", True)))
+        self.writing.set_on(bool(cfg["write"]["enabled"]))
 
     @objc.python_method
     def set_status(self, text, on):
@@ -88,6 +93,7 @@ class Root(Flipped):
         put("like a mouse, anywhere in the frame" if rel else
             "a camera box maps onto the screen", T.PAD + 70 + 150, WIN_H - FOOT + 14, T.SIZE_SMALL, T.dim())
         put("hot corners", WIN_W / 2 + 4, WIN_H - FOOT + 14, T.SIZE_SMALL, T.fg2())
+        put("air writing", WRITE_X, WIN_H - FOOT + 14, T.SIZE_SMALL, T.fg2())
         put("off: keep 4 px from corners", WIN_W - T.PAD, WIN_H - FOOT + 14, T.SIZE_SMALL, T.dim(), right=True)
 
 

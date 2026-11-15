@@ -4,12 +4,13 @@ import pytest
 import bindings
 from actions import Actions, MODS
 from events import Event
+from state import SharedState
 from synth import cfg
 
 
 class Rec(Actions):
     def __init__(self, c):
-        super().__init__(c, None)
+        super().__init__(c, SharedState())
         self.calls = []
         self.desktop.set([(0, 0, 1001, 501)])             # fixed 1001 x 501 screen
         self._poll_t = 1e18                               # never re-query the real displays
@@ -18,6 +19,7 @@ class Rec(Actions):
     def _button(self, pt, down, right=False, count=1, middle=False):
         self.calls.append(("btn", down, "middle" if middle else "right" if right else "left", count))
     def key(self, code, flags=0): self.calls.append(("key", code, flags))
+    def type_text(self, s): self.calls.append(("text", s))
     def scroll(self, dy): self.calls.append(("scroll", dy))
     def media_key(self, k): self.calls.append(("media", k))
     def tile(self, mode): self.calls.append(("tile", mode))
@@ -86,7 +88,7 @@ def test_every_action_id_is_implemented(monkeypatch):
     for aid in bindings.ACTIONS:
         a = Rec(cfg())
         a.run(aid, (1.0, 2.0), 7)
-        assert a.calls or osa or aid in ("none", "drag"), aid
+        assert a.calls or osa or a.state.commands or aid in ("none", "drag"), aid
     assert len(osa) == 1
 
 
@@ -325,3 +327,72 @@ def test_minimize_and_full_screen_send_their_shortcuts(monkeypatch):
     act.run("minimize")
     act.run("full_screen")
     assert sent == [(A.K_M, A.MODS["command"]), (A.K_F, A.MODS["command"] | A.MODS["control"])]
+
+
+# ---------------------------------------------------------------- air-writing: typing
+def test_type_text_posts_one_key_down_and_up_with_the_unicode_string_and_no_flags(monkeypatch):
+    import Quartz
+    made, posted = [], []
+    real_create = Quartz.CGEventCreateKeyboardEvent
+    real_set = Quartz.CGEventKeyboardSetUnicodeString
+
+    def create(src, code, down):
+        ev = real_create(src, code, down)
+        made.append({"ev": ev, "code": code, "down": down, "text": None, "flags": None})
+        return ev
+
+    def set_text(ev, n, s):
+        next(m for m in made if m["ev"] is ev)["text"] = (n, s)
+        return real_set(ev, n, s)
+
+    def set_flags(ev, fl):
+        next(m for m in made if m["ev"] is ev)["flags"] = fl
+
+    monkeypatch.setattr(Quartz, "CGEventCreateKeyboardEvent", create)
+    monkeypatch.setattr(Quartz, "CGEventKeyboardSetUnicodeString", set_text)
+    monkeypatch.setattr(Quartz, "CGEventSetFlags", set_flags)
+    monkeypatch.setattr(Quartz, "CGEventPost", lambda tap, ev: posted.append(next(m for m in made if m["ev"] is ev)))
+    Actions(cfg(), None).type_string("a")
+    assert [(m["down"], m["text"], m["flags"]) for m in posted] == [(True, (1, "a"), 0), (False, (1, "a"), 0)]
+
+
+def test_write_events_and_space_delete_enter_route_to_the_right_primitives():
+    assert run(Event("write", {"op": "text", "text": "h"}, pulse=True)) == [("text", "h")]
+    assert run(Event("write", {"op": "enter"}, pulse=True)) == [("key", 36, 0)]
+    assert run(gest("write_flick_right")) == [("text", " ")]
+    assert run(gest("write_flick_left")) == [("key", 51, 0)]
+    assert run(gest("write_flick_left"), write_flick_left="none") == []
+    assert run(gest("pinch"), pinch="enter") == [("key", 36, 0)]
+    assert run(gest("pinch"), pinch="type_space") == [("text", " ")]
+
+
+def test_toggle_write_queues_a_command_for_the_main_thread():
+    from state import SharedState
+    a = Rec(cfg(bindings={**bindings.DEFAULT_BINDINGS, "pinch": "toggle_write"}))
+    a.state = SharedState()
+    a.execute(gest("pinch"))
+    assert a.state.pop_commands() == [("toggle_write", None)]
+
+
+def test_text_and_chords_play_in_order_on_the_key_worker(monkeypatch):
+    import time
+    import actions as A
+    monkeypatch.setattr(A, "KEY_GAP", 0.001)
+    played = []
+
+    class K(Actions):
+        def key_sequence(self, code, flags=0, sleep=time.sleep): played.append(("key", code))
+        def type_string(self, s): played.append(("text", s))
+    a = K(cfg(), None)
+    a.type_text("h"); a.key(51); a.type_text("i"); a.key(36)
+    t = time.time()
+    while len(played) < 4 and time.time() - t < 2:
+        time.sleep(0.01)
+    assert played == [("text", "h"), ("key", 51), ("text", "i"), ("key", 36)]
+
+
+def test_bindings_for_writing_are_stable_and_listed():
+    assert bindings.DEFAULT_BINDINGS["write_flick_right"] == "type_space" and bindings.DEFAULT_BINDINGS["write_flick_left"] == "backspace"
+    assert ("writing", ["write_flick_right", "write_flick_left"]) in bindings.groups()
+    assert {"type_space", "backspace", "enter", "toggle_write"} <= set(bindings.choices("write_flick_left"))
+    assert bindings.gesture_of(Event("write", {"op": "text", "text": "a"})) is None

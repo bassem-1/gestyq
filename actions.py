@@ -23,6 +23,7 @@ from gestures import tile_rect
 # virtual key codes
 K_TAB, K_LEFT, K_RIGHT, K_DOWN, K_UP, K_F11, K_3 = 48, 123, 124, 125, 126, 103, 20
 K_M, K_F = 46, 3
+K_SPACE, K_DELETE, K_RETURN = 49, 51, 36
 K_CMD, K_SHIFT, K_OPT, K_CTRL = 55, 56, 58, 59
 ARROWS = (K_LEFT, K_RIGHT, K_DOWN, K_UP)
 FN_FLAG = Quartz.kCGEventFlagMaskSecondaryFn
@@ -237,16 +238,35 @@ class Actions:
         if self._keythread is None:
             self._keythread = threading.Thread(target=self._key_worker, daemon=True, name="gestyq-keys")
             self._keythread.start()
-        self._keyq.put((code, flags))
+        self._keyq.put(("key", code, flags))
+
+    def type_text(self, s):
+        """Queue text to type into the focused app (air-writing). Plays in order with the key chords."""
+        if self._keythread is None:
+            self._keythread = threading.Thread(target=self._key_worker, daemon=True, name="gestyq-keys")
+            self._keythread.start()
+        self._keyq.put(("text", s))
 
     def _key_worker(self):
         while True:
-            code, flags = self._keyq.get()
+            item = self._keyq.get()
             try:
-                self.key_sequence(code, flags)
+                if item[0] == "text":
+                    self.type_string(item[1])
+                else:
+                    self.key_sequence(item[1], item[2])
                 time.sleep(KEY_GAP)
             except Exception as e:
-                print("key error:", code, flags, e)
+                print("key error:", item, e)
+
+    def type_string(self, s):
+        """One key down + up carrying the unicode string (no modifiers), the way an input method types."""
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        for down in (True, False):
+            ev = Quartz.CGEventCreateKeyboardEvent(src, 0, down)
+            Quartz.CGEventKeyboardSetUnicodeString(ev, len(s), s)
+            Quartz.CGEventSetFlags(ev, 0)
+            self._post(ev)
 
     @staticmethod
     def key_flags(code, flags):
@@ -383,6 +403,14 @@ end tell''')
             self.key(K_3, MODS["command"] | MODS["shift"])        # full screen, the system's own save location
         elif action == "display_sleep":
             self._run(["pmset", "displaysleepnow"])
+        elif action == "type_space":
+            self.type_text(" ")
+        elif action == "backspace":
+            self.key(K_DELETE)
+        elif action == "enter":
+            self.key(K_RETURN)
+        elif action == "toggle_write":
+            self.state.command("toggle_write")
 
     def execute(self, ev):
         k, v = ev.kind, ev.value
@@ -398,6 +426,11 @@ end tell''')
                         self.move_to(pt, True)
                         self._button(pt, False)
                         self.dragging = False
+                elif k == "write":                                   # a letter from the air-writing canvas
+                    if v.get("op") == "text":
+                        self.type_text(v["text"])
+                    elif v.get("op") == "enter":
+                        self.key(K_RETURN)
                 else:
                     gid = bindings.gesture_of(ev)
                     if gid is None:

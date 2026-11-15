@@ -18,6 +18,9 @@ import cameras
 import config
 import login
 from state import SharedState
+from axreader import FocusReader
+from textfocus import CanvasGate, place_canvas
+from ui.canvas import CanvasController, H as CANVAS_H, W as CANVAS_W
 from ui.gadget import GadgetController
 from ui.menubar import MenuBar
 from ui.window import MainWindowController
@@ -81,6 +84,11 @@ class Model:
 
     def reset_bindings(self):
         self.cfg["bindings"] = dict(bindings.DEFAULT_BINDINGS)
+        self.saver.poke()
+        self.on_change()
+
+    def set_write_enabled(self, on):
+        self.cfg["write"]["enabled"] = bool(on)
         self.saver.poke()
         self.on_change()
 
@@ -149,6 +157,11 @@ class Delegate(NSObject):
         request_camera_access()
         m.vision.start()
         self.gadget = GadgetController(m)
+        self.canvas = CanvasController(m)
+        self.focus = FocusReader()
+        self.gate = CanvasGate()
+        self.click, self.last_poll = None, time.monotonic()
+        self.last_focus = 0.0
         self.menubar = MenuBar(m)
         self.window = MainWindowController.alloc().initWithModel_(m)
         m.open_window = self.show_window
@@ -223,6 +236,46 @@ class Delegate(NSObject):
             "screens": [{"frame": rect(s.frame()), "visible": rect(s.visibleFrame())} for s in scr],
             "main": next((i for i, s in enumerate(scr) if main is not None and s == main), 0)})
 
+    @objc.python_method
+    def write_tick(self, now, snap, on):
+        """Air-writing: every write.poll s read the focused element (main thread, Accessibility API), decide with the
+        CanvasGate whether the canvas shows, tell the vision thread, and place / hide the panel. Every tick: redraw."""
+        m, w = self.model, self.model.cfg["write"]
+        if now - self.last_focus >= w["poll"]:
+            dt, self.last_focus = now - self.last_focus, now
+            enabled = bool(on and m.trusted and w["enabled"])
+            focus = None
+            if enabled:
+                try:
+                    from Quartz import (CGEventCreate, CGEventGetLocation, CGEventSourceSecondsSinceLastEventType,
+                                        kCGEventLeftMouseDown, kCGEventSourceStateCombinedSessionState)
+                    ago = CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState,
+                                                                 kCGEventLeftMouseDown)
+                    if ago < dt + 0.05:
+                        loc = CGEventGetLocation(CGEventCreate(None))
+                        self.click = (now - ago, (loc.x, loc.y))
+                except Exception:
+                    pass
+                focus = self.focus.read(now)
+            self.gate.trigger, self.gate.idle_hide = w["trigger"], w["idle_hide"]
+            ink = snap.get("ink")
+            if ink and (ink["pen"] or ink["strokes"]):
+                self.gate.note_ink(now)
+            visible = self.gate.step(now, focus, enabled, self.click)
+            if visible and focus is not None:
+                scr = snap.get("screen")
+                if scr:
+                    ph = scr["primary_h"]
+                    screens = [(f["visible"][0], ph - (f["visible"][1] + f["visible"][3]), f["visible"][2], f["visible"][3])
+                               for f in scr["screens"]]
+                    if not self.canvas.shown:
+                        m.vision.set_write(True, self.gate.shown_at)
+                    self.canvas.show(place_canvas(focus.frame, screens, (CANVAS_W, CANVAS_H)), ph)
+            elif not visible and self.canvas.shown:
+                m.vision.set_write(False)
+                self.canvas.hide()
+        self.canvas.update(snap.get("ink"), now)
+
     def tick_(self, timer):
         now = time.monotonic()
         m = self.model
@@ -235,6 +288,10 @@ class Delegate(NSObject):
             m.refresh_trust()
         snap = m.state.get()
         on = snap["enabled"]
+        for name, _ in m.state.pop_commands():
+            if name == "toggle_write":
+                m.set_write_enabled(not m.cfg["write"]["enabled"])
+        self.write_tick(now, snap, on)
         pulsed = snap["pulse_n"] != self.last_pulse
         self.last_pulse = snap["pulse_n"]
         self.gadget.update(on, snap["caption"] if on else "paused", pulsed)

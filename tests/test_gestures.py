@@ -854,3 +854,146 @@ def test_fist_trace_log_line_for_tuning(capsys):
     s = Sim()
     s.step(R(0.5), n=12)                                             # an open hand logs nothing
     assert "fist-trace" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- air-writing (engine level)
+from test_ink import template_path    # noqa: E402
+
+POINT = (0, 1, 1, 1)
+
+
+class Writing:
+    """A Sim whose pointer hand draws palm-unit paths with its index tip while the canvas is 'up'."""
+
+    def __init__(self, active=True, **over):
+        self.s = Sim(**over)
+        self.s.e.write_active = active
+        self.pal = palm_of()
+        self.pos = (0.0, 0.0)
+        self.pen_moves = []              # move events seen while the pen was down
+        self.evs = []
+
+    def hand(self, p, curl=POINT, **kw):
+        a = self.s.e.aspect
+        return make_hand("right", x=0.5 - p[0] * self.pal, y=0.5 + p[1] * self.pal * a, curl=curl, **kw)
+
+    def frame(self, p=None, curl=POINT, **kw):
+        self.pos = p or self.pos
+        ev = self.s.step(right=self.hand(self.pos, curl, **kw))
+        w = self.s.e._w
+        if w is not None and w.pen:
+            self.pen_moves += [e for e in ev if e.kind == "move"]
+        self.evs += ev
+        return ev
+
+    def hold(self, seconds, **kw):
+        for _ in range(int(round(seconds * 30))):
+            self.frame(**kw)
+
+    def arm(self):
+        self.hold(0.7, curl=(0, 0, 0, 0))
+        self.hold(0.2)
+
+    def draw(self, pts, **kw):
+        if math.dist(pts[0], self.pos) > 0.3 and not kw:        # move there with an open hand, then point
+            for _ in range(10):
+                self.frame(pts[0], curl=(0, 0, 0, 0))
+            for _ in range(8):
+                self.frame(pts[0])
+        for p in pts:
+            self.frame(p, **kw)
+
+    def writes(self):
+        return [e.value for e in self.evs if e.kind == "write"]
+
+    def gestures(self):
+        return [e.value["id"] for e in self.evs if e.kind == "gesture"]
+
+
+def test_writing_an_o_types_one_o_and_never_moves_the_cursor_while_the_pen_is_down():
+    w = Writing()
+    w.arm()
+    w.draw(template_path("o")[0])
+    w.hold(1.0)
+    assert w.writes() == [{"op": "text", "text": "o"}]
+    assert w.pen_moves == []
+    assert w.s.e.typed == "o" and w.s.e.ink["result"]["char"] == "o"
+
+
+def test_same_frames_with_the_canvas_away_move_the_cursor_and_type_nothing():
+    w = Writing(active=False)
+    w.hold(0.9, curl=(0, 0, 0, 0))
+    w.draw(template_path("o")[0])
+    w.hold(1.0)
+    assert w.writes() == [] and any(e.kind == "move" for e in w.evs)
+    assert w.s.e.ink is None
+
+
+def test_a_fast_horizontal_stroke_with_the_pen_down_fires_no_flick():
+    w = Writing()
+    w.arm()
+    w.hold(0.5)                                   # pen down, no ink yet
+    assert w.s.e._w.pen
+    step = 15 / 30                                # 15 palm sizes / s
+    w.draw([(step * i, 0.0) for i in range(1, 7)])
+    assert w.gestures() == []
+
+
+def _last_x(w):
+    return 0.5 - w.pos[0] * w.pal
+
+
+def test_pointer_hand_flick_is_a_write_gesture_while_the_canvas_is_up_and_a_swipe_otherwise():
+    for active, expect in ((True, ["write_flick_right"]), (False, ["swipe_left"])):
+        w = Writing(active=active)
+        w.hold(0.9, curl=(0, 0, 0, 0))
+        flick(w.s, "right", 0.5, -1 if active else +1)
+        assert w.s.kinds("gesture") and [e.value["id"] for _, e in w.s.kinds("gesture")] == expect, active
+    # the left hand is untouched by the canvas
+    sim = Sim()
+    sim.e.write_active = True
+    for _ in range(27):
+        sim.step(right=R(0.3, curl=(0, 0, 0, 0)), left=Lh(0.7))
+    flick(sim, "left", 0.7, +1, other=R(0.3, curl=(0, 0, 0, 0)))
+    assert [e.value["id"] for _, e in sim.kinds("gesture")] == ["swipe_left"]
+
+
+def test_flick_left_with_pending_ink_discards_it_and_emits_nothing_but_flick_right_commits_first():
+    for direction, want in ((+1, []), (-1, ["write_flick_right"])):
+        w = Writing()
+        w.arm()
+        w.draw(template_path("o")[0])
+        w.hold(0.12, curl=(0, 0, 0, 0))
+        w.hold(0.3, curl=(0, 0, 0, 0))            # pen up, the letter is pending (pause is 0.6 s)
+        assert w.s.e.writer.busy
+        flick(w.s, "right", 0.5 - w.pos[0] * w.pal, direction, pose={"curl": (0, 0, 0, 0)},
+              y0=0.5 + w.pos[1] * w.pal * w.s.e.aspect)
+        assert w.gestures() == [] and [e.value["id"] for _, e in w.s.kinds("gesture")] == want
+        if direction > 0:
+            assert not w.s.e.writer.busy and w.writes() == []
+        else:
+            assert [e.value for _, e in w.s.kinds("write")] == [{"op": "text", "text": "o"}]
+            assert w.s.e.typed == "o "
+
+
+def test_a_fist_while_writing_starts_no_drag():
+    w = Writing()
+    w.arm()
+    w.draw(template_path("o")[0][:10])
+    w.hold(0.4, curl=(1, 1, 1, 1))
+    assert w.s.kinds("drag_start") == []
+    w2 = Writing(active=False)
+    w2.hold(0.5, curl=(0, 0, 0, 0))
+    w2.hold(0.4, curl=(1, 1, 1, 1))
+    assert w2.s.kinds("drag_start") != []          # without the canvas the same fist still drags
+
+
+def test_a_pinch_right_after_the_pen_lifts_is_no_click_but_a_later_one_clicks():
+    w = Writing()
+    w.arm()
+    w.hold(0.4)                                    # pen down
+    w.hold(0.2, pinch=1.0)                         # pinch 0.1 s after the pen
+    assert w.gestures().count("pinch") == 0
+    w.hold(0.7, curl=(0, 0, 0, 0))
+    w.hold(0.3, pinch=1.0)
+    assert w.gestures().count("pinch") == 1

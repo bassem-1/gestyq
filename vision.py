@@ -207,6 +207,9 @@ class VisionThread(threading.Thread):
         self.on_evt = threading.Event()         # gestyq is ON: the camera runs and actions execute
         self.win_evt = threading.Event()        # the app window is open: publish the live view (never starts the camera)
         self.record_evt = threading.Event()
+        self.write_evt = threading.Event()      # the air-writing canvas is up: the engine inks and may type
+        self.write_shown = None                 # monotonic time the canvas appeared (arm delay)
+        self._ink_pub = None
         self.recorder = Recorder()
         self.glog = GestureLog()
         self.last_pub = 0.0
@@ -241,6 +244,16 @@ class VisionThread(threading.Thread):
             self.win_evt.clear()
             self.record_evt.clear()
         self.state.update(window_open=bool(open_))
+
+    def set_write(self, active, shown_at=None):
+        """Main thread: the canvas appeared / went away. Anything recognised after it left is dropped."""
+        if active:
+            self.write_shown = shown_at
+            self.write_evt.set()
+        else:
+            self.write_evt.clear()
+            self.write_shown = None
+        self.state.update(write=bool(active))
 
     def set_recording(self, on):
         if on:
@@ -303,7 +316,9 @@ class VisionThread(threading.Thread):
         self.recorder.stop()
         self.glog.clear()
         self.prev_anchors = []
-        self.state.update(camera="off", caption="paused", hands=0, live=None, recording=None)
+        self.write_evt.clear()
+        self._ink_pub = None
+        self.state.update(camera="off", caption="paused", hands=0, live=None, recording=None, ink=None, write=False)
 
     def _release(self):
         """Never leave a mouse button held (turning off, display change)."""
@@ -422,7 +437,15 @@ class VisionThread(threading.Thread):
                 self.engine.observe_face(face_geom(face) if face else None, now, plan.zoom)
                 if self.recorder.active:
                     self.recorder.write(now, w / h, hands)      # full-frame normalised, whatever was cropped
+                wr = self.write_evt.is_set()
+                self.engine.write_active, self.engine.write_shown_at = wr, self.write_shown if wr else None
                 evs = self.engine.update(hands, now, face.box if face else None)
+                if not wr or not self.write_evt.is_set():       # nothing is typed once the canvas left
+                    evs = [e for e in evs if e.kind != "write"]
+                n_ink = self.engine.ink["n"] if wr and self.engine.ink else None
+                if n_ink != self._ink_pub:
+                    self._ink_pub = n_ink
+                    self.state.update(ink=self.engine.ink if wr else None)
                 if head_lvl > 0:
                     if ts_f is not None:
                         hev = self.head.update(face, now, head_lvl, self.engine.dragging)

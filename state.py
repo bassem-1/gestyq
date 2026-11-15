@@ -17,6 +17,8 @@ class SharedState:
             "window_open": False,   # app window shown (the camera is NOT started by it: off means camera off)
             "live": None,           # window only, while the camera runs: {n, t, jpg, aspect, debug, head, gestures, caption}
             "recording": None,      # {active, elapsed} while the window is open
+            "ink": None,            # air-writing canvas snapshot (gestures.GestureEngine.ink), None while the canvas is away
+            "write": False,         # the canvas is up (the engine may type)
             "screen": None,         # {"visible": (x, y, w, h), "primary_h": h}, published by the UI thread
         }
         self.commands = []

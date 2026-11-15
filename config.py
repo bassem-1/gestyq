@@ -162,6 +162,18 @@ DEFAULTS = {
         "face_loss_reset": 0.5,
     },
     "gaze": {"x_thresh": 0.30, "up_thresh": 0.25, "down_thresh": 0.25, "dwell": 2.0, "grace": 0.3},
+    # air-writing: when a text field is clicked a small black canvas appears; the index fingertip draws, a letter
+    # ends when the tip is still for `still` s or the pen is up for `pause` s (see ink.py, recognizer.py)
+    "write": {
+        "enabled": True,          "trigger": "click",       "recognizer": "templates",
+        "pause": 0.6,             "still": 0.5,             "still_radius": 0.12,      # s, s, palm sizes
+        "arm_delay": 0.5,         "idle_hide": 12.0,        "poll": 0.2,
+        "cursor_hold": 0.15,      "click_guard": 0.25,
+        "min_ink": 0.5,           "min_size": 0.6,          # palm sizes: shorter / smaller ink is dropped
+        "reject": 0.28,           "margin": 0.02,           "user_weight": 0.9,   "max_user": 5,
+        "min_cutoff": 2.0,        "beta": 0.02,             "ink_scale": 48,      # ink_scale: points per palm size
+        "charset": "lower",
+    },
     # gesture id -> action id (see bindings.py); the app window edits this
     "bindings": dict(bindings.DEFAULT_BINDINGS),
 }

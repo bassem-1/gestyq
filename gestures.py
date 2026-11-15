@@ -4,6 +4,9 @@ Events (see bindings.gesture_of): continuous "move", "drag_start"/"drag_move"/"d
 hand up = positive); discrete hand gestures are Event("gesture", {"id": gesture_id, "pos": (nx, ny)|None},
 pulse=True) (flicks also carry "hand": the role that flicked). What a gesture DOES is cfg["bindings"], read here only to decide whether to emit it
 (a gesture bound to "none" emits nothing; fist bound to "drag" drags, to anything else fires once per hold).
+Air-writing adds Event("write", {"op": "text", "text": "a"} | {"op": "enter"}, pulse=True): a recognised letter. It
+is not a rebindable gesture (bindings.gesture_of returns None for it). While the canvas is up (write_active) the
+pointer hand's flicks are the gestures write_flick_right / write_flick_left instead of swipe_*.
 """
 import math
 from collections import deque
@@ -12,6 +15,8 @@ import bindings
 from config import GAIN_SCALE, POINTER_SCALE
 from desktop import ControlBox, RelativePointer, from_norm, margin_box, to_norm
 from events import Event
+import ink
+import recognizer
 from filters import DeadZone, OneEuro, OneEuro2D, RingBuffer, clamp
 from tracking import FOUR, HandState, HandTracker, iso, median, palm_anchor, palm_scale
 
@@ -71,6 +76,7 @@ class PointerHand:
         self.ref_w = 1920.0                                # px width of the reference display
         self.aspect = 16 / 9                               # camera frame width / height
         self.hint = None                                   # the real cursor (global px): where a new track starts
+        self.click_block_until = -1e9                      # a pinch that began before this is a pen lift, not a click
         self.reset()
 
     def set_relative(self, rel, ev):
@@ -128,7 +134,8 @@ class PointerHand:
             self._place(at)
             self._move(at, ev)
 
-    def step(self, hs, now, ev, screen, scale, dwell_on, gain=1.0):
+    def step(self, hs, now, ev, screen, scale, dwell_on, gain=1.0, quiet=False):
+        """quiet: air-writing is in progress, so no fist and no dwell on this hand."""
         h = self.h
         held = now < self.hold_until
         if self.relative:
@@ -150,13 +157,13 @@ class PointerHand:
         if m == "move":
             if pn.raw:                          # a pinch always wins over a fist and never starts a drag
                 self.mode, self.t_onset = "pinch_wait", pn.onset
-            elif label == "fist" and act("fist") != "none":
+            elif label == "fist" and act("fist") != "none" and not quiet:
                 self.mode, self.t_onset = "fist_wait", hs.label_since
             else:
                 if not held:
                     self.cur = pos
                     self._move(pos, ev)
-                if dwell_on:
+                if dwell_on and not quiet:
                     self._dwell(self.cur or pos, now, ev, screen)
                 return
             m = self.mode
@@ -169,9 +176,11 @@ class PointerHand:
                 self._place(at)
                 self._move(at, ev)
                 dbl = now - self.last_click < h["double_click_gap"] and act("double_pinch") != "none"
-                self.last_click = -1e9 if dbl else now
+                guarded = self.t_onset <= self.click_block_until
+                if not guarded:
+                    self.last_click = -1e9 if dbl else now
                 gid = "double_pinch" if dbl else "pinch"
-                if act(gid) != "none":
+                if act(gid) != "none" and not guarded:
                     ev.append(Event("gesture", {"id": gid, "pos": (at[0], at[1])}, pulse=True))
                 self.mode = "pinch"
         elif m == "pinch":
@@ -367,6 +376,17 @@ class GestureEngine:
         self.flash_text, self.flash_until = None, 0.0
         self.debug = []
         self.labels = {}
+        # air-writing (see ink.py, recognizer.py): the vision thread sets write_active each frame
+        self.writer = ink.Writer(cfg)
+        self.recognizer = recognizer.make(cfg)
+        self.write_active = False
+        self.write_shown_at = None
+        self.ink = None                  # latest canvas snapshot (see _ink_view), None while the canvas is away
+        self.ink_n = 0
+        self.typed = ""
+        self.ink_result = None
+        self._w = None
+        self._ink_sig = None
 
     def reset(self):
         self.tracker.reset()
@@ -381,6 +401,11 @@ class GestureEngine:
             self.flicks[k].reset()
             self.xh[k].clear()
         self.debug, self.labels = [], {}
+        self._write_reset()
+
+    def _write_reset(self):
+        self.writer.reset()
+        self.typed, self.ink_result, self.ink, self._w, self._ink_sig = "", None, None, None, None
 
     def observe_face(self, geom, now, far=None):
         """geom: roi.FaceGeom in full-frame coords (or None); far: the camera is zoomed (user far away),
@@ -405,6 +430,7 @@ class GestureEngine:
         ev = []
         self.pointer.lost(ev)
         self.command.lost()
+        self._write_reset()
         return ev
 
     def caption(self, now):
@@ -477,6 +503,7 @@ class GestureEngine:
         rel = self.relative
         pt = self.pointer
         pt.set_relative(rel, ev)
+        o = self._write_step(by, now, ev)
         # right hand = pointer
         if "right" in by and speed > 0:
             rs = self.states["right"]
@@ -488,7 +515,7 @@ class GestureEngine:
                 pt.box = self.cbox.update(now, frozen, self.union_aspect, self.aspect,
                                           -1 if cfg.get("swap_hands") else 1, self.union_span)
             pt.step(rs, now, ev, self.screen, POINTER_SCALE.get(speed, 1.0), bool(cfg.get("dwell_click")),
-                    GAIN_SCALE.get(speed, 1.0))
+                    GAIN_SCALE.get(speed, 1.0), o is not None and (o.pen or o.busy))
         elif now - self.last_seen["right"] > h["loss_grace"] or speed <= 0:
             pt.lost(ev)
         # left hand = commands
@@ -518,12 +545,80 @@ class GestureEngine:
                 self.flash(f"{role} · {label}", now, 0.5 if e.kind == "gesture" else 0.3)
         return ev
 
+    # -- air-writing
+    def _write_step(self, by, now, ev):
+        """Steps the Writer for the pointer hand, applies its cursor / click effects, recognises a finished letter
+        and builds the canvas snapshot. -> the Writer's Out, or None while the canvas is away."""
+        w = self.cfg["write"]
+        active = bool(self.write_active and w["enabled"])
+        if not active:
+            self.writer.shown_at = None
+            if self._w is not None or self.ink is not None or self.writer.was_active:
+                self._write_reset()
+            self._w = None
+            return None
+        if not self.writer.was_active:
+            self.typed, self.ink_result = "", None
+            self.writer.shown_at = self.write_shown_at
+        rs = self.states["right"] if "right" in by else None
+        lms = by["right"].obs.lms if rs is not None else None
+        if self.write_shown_at is not None:
+            self.writer.shown_at = self.write_shown_at
+        o = self.writer.step(rs, lms, self.aspect, now, True, free=self.pointer.mode == "move")
+        self._w = o
+        if o.freeze:
+            self.pointer.hold_until = max(self.pointer.hold_until, now + w["cursor_hold"])
+        self.pointer.click_block_until = self.writer.last_pen + w["click_guard"]
+        if o.commit:
+            self._write_commit(o.commit, now, ev)
+        elif o.result == "small":
+            self.ink_result = {"t": now, "char": None, "alt": None, "why": "small", "strokes": ()}
+        self._ink_view(now)
+        return o
+
+    def _typed(self, action):
+        if action == "type_space":
+            self.typed = (self.typed + " ")[-16:]
+        elif action == "backspace":
+            self.typed = self.typed[:-1]
+
+    def _write_commit(self, strokes, now, ev):
+        if not strokes:
+            return
+        cands = self.recognizer.recognize(strokes)
+        keep = tuple(tuple(s) for s in strokes)
+        if not cands:
+            self.ink_result = {"t": now, "char": None, "alt": None, "why": "reject", "strokes": keep}
+            return
+        ch = cands[0].char
+        alt = cands[1].char if self.recognizer.unsure(cands) and cands[1].char != "\n" else None
+        if ch == "\n":
+            ev.append(Event("write", {"op": "enter"}, pulse=True))
+        else:
+            ev.append(Event("write", {"op": "text", "text": ch}, pulse=True))
+            self.typed = (self.typed + ch)[-16:]
+        self.flash("write · " + ("enter" if ch == "\n" else ch), now, 0.5)
+        self.ink_result = {"t": now, "char": ch, "alt": alt, "why": "", "strokes": keep}
+
+    def _ink_view(self, now):
+        """The canvas snapshot (state["ink"]): a new tuple dict with n bumped whenever anything the view shows changed."""
+        v = self.writer.view()
+        r = self.ink_result
+        sig = (v["strokes"], v["tip"], v["pen"], v["hand"], self.writer.armed(now), r and r["t"], self.typed)
+        if sig != self._ink_sig:
+            self._ink_sig = sig
+            self.ink_n += 1
+            self.ink = {"n": self.ink_n, "strokes": v["strokes"], "tip": v["tip"], "pen": v["pen"], "hand": v["hand"],
+                        "armed": sig[4], "result": dict(r) if r else None, "typed": self.typed}
+
     # -- flicks
     def _flick_blocked(self, role, st, now):
         """Any pose may flick except an active pinch, drag or two-finger scroll."""
         if st.pinch.raw or st.pinch.confirmed or st.pose_raw == "scroll" or st.label == "scroll" \
                 or now - st.scroll_seen <= self.h.get("scroll_veto", 0.6):
             return True
+        if role == "right" and self._w is not None and (self._w.pen or now - self.writer.last_pen < 0.2):
+            return True                  # a pen stroke is not a flick
         return role == "right" and self.pointer.mode in ("pinch_wait", "pinch", "fist_wait", "fist_done", "drag")
 
     def _moved(self, role, since, now):
@@ -548,7 +643,8 @@ class GestureEngine:
             c = self.flicks[role].update(now, x, y, st.palm, self._flick_blocked(role, st, now))
             if c is None:
                 continue
-            gid = "swipe_right" if c["dir"] > 0 else "swipe_left"
+            writing = role == "right" and self._w is not None
+            gid = ("write_flick_" if writing else "swipe_") + ("right" if c["dir"] > 0 else "left")
             why = c["why"]
             if not why:
                 other = "left" if role == "right" else "right"
@@ -568,7 +664,16 @@ class GestureEngine:
                 why = "fired " + gid
                 self.fl_t, self.fl_dir = now, c["dir"]
                 self.flicks[role].reset()
+                if writing and self.writer.busy:
+                    # ink is pending: left throws it away, right finishes the letter before the space
+                    if c["dir"] < 0:
+                        self.writer.discard()
+                        self.ink_result = None
+                        continue
+                    self._write_commit(self.writer.commit_now(now), now, ev)
                 ev.append(Event("gesture", {"id": gid, "pos": None, "hand": role}, pulse=True))
+                if writing:
+                    self._typed(bindings.action_for(cfg, gid))
                 if role == "right":
                     self.pointer.restore(c["start"], now, ev)
                 print(f"flick-trace {'right' if c['dir'] > 0 else 'left'} hand={role} peak={c['peak']:.1f} palm/s "

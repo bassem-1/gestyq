@@ -38,6 +38,10 @@ ACTIONS = {
     "volume_down":         {"label": "volume down",          "kind": "discrete"},
     "screenshot":          {"label": "screenshot",           "kind": "discrete"},
     "display_sleep":       {"label": "display sleep",        "kind": "discrete"},
+    "type_space":          {"label": "space",                "kind": "discrete"},
+    "backspace":           {"label": "delete",               "kind": "discrete"},
+    "enter":               {"label": "enter",                "kind": "discrete"},
+    "toggle_write":        {"label": "air writing on / off", "kind": "discrete"},
 }
 
 DISCRETE = [a for a, d in ACTIONS.items() if d["kind"] == "discrete"]
@@ -63,6 +67,10 @@ GESTURES = {
                        "how": "flick either hand to your left, like waving a fly away"},
     "swipe_right":    {"group": "either hand", "hand": "either", "kind": "discrete", "label": "flick right",
                        "how": "flick either hand to your right, like waving a fly away"},
+    "write_flick_right": {"group": "writing", "hand": "pointer", "kind": "discrete", "label": "flick right",
+                          "how": "while the canvas is up: open the writing hand and flick it to your right"},
+    "write_flick_left":  {"group": "writing", "hand": "pointer", "kind": "discrete", "label": "flick left",
+                          "how": "while the canvas is up: open the writing hand and flick it to your left"},
     "palms_left":     {"group": "both hands", "hand": "both", "kind": "discrete", "label": "both palms left",
                        "how": "both palms open, move together to your left"},
     "palms_right":    {"group": "both hands", "hand": "both", "kind": "discrete", "label": "both palms right",
@@ -96,6 +104,8 @@ DEFAULT_BINDINGS = {
     "two_finger": "scroll",
     "swipe_left": "next_space",        # flick to the user's left -> next space (trackpad convention)
     "swipe_right": "prev_space",
+    "write_flick_right": "type_space",
+    "write_flick_left": "backspace",
     "palms_left": "tile_left",
     "palms_right": "tile_right",
     "palms_apart": "tile_fill",
@@ -142,7 +152,7 @@ def gesture_of(ev):
     Event contract:  Event("gesture", {"id": gesture_id, "pos": (nx, ny) | None})  for discrete
     hand gestures; continuous ones keep their kinds ("drag_start" -> fist, "scroll" -> two_finger);
     head.py still emits Event("head", "next_app"|"prev_app"|"sleep") and gaze.py
-    Event("gaze", "top-left"|...)."""
+    Event("gaze", "top-left"|...). Event("write", ...) (a recognised letter, see gestures.py) is not a gesture: None."""
     k, v = ev.kind, ev.value
     if k == "gesture":
         return v["id"]

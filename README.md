@@ -92,11 +92,44 @@ any held mouse button and the camera.
 | left | thumb + index pinch | right click |
 | left | index + middle up, move up/down | scroll |
 | either | flick the hand sideways, any pose, like waving a fly away (a burst above 10 palm sizes / s, 0.8+ palm sizes within 0.25 s; the return stroke is ignored) | next space (your left) / previous space (your right) |
+| right | point (index out, other fingers folded) while the canvas is up | pen: the fingertip draws, the cursor stands still |
+| right | open hand, flick sideways while the canvas is up | space (your right) / delete (your left) |
 | both | open palms: move together left/right, spread apart, bring together | tile window left/right, maximize, minimize |
 | head | turn right and back / left and back | next app (cmd+tab) / previous app |
 | head | tilt up and hold 0.6 s | display sleep |
 
 eye corners (gaze dwell on a screen corner) is beta and off by default.
+
+## writing
+
+air-writing types letters you draw in the air. nothing changes until you **click a text field** (with gestyq or the
+real mouse): a small black canvas appears next to the field. it never takes focus and clicks pass through it, so the
+caret stays where it was. click anywhere else and it goes away. password fields never show it.
+
+- **point** (index out, other fingers folded) and the fingertip draws red ink. the cursor stands still while you draw.
+  the first half second after the canvas appears is ignored, so the hand coming out of the click does not scribble.
+- the letter is finished when the fingertip is **still for 0.5 s**, or when you open the hand (**pen up**) for
+  0.6 s. the letter is typed into the field and shown on the canvas for a moment (`g · q` means it was unsure: the
+  runner-up). lift and write a second stroke within 0.6 s and it is the same letter (t, x, k, f).
+- **space**: open your hand and flick it to your right. **delete**: flick left (this throws away ink you have just
+  drawn, or deletes the last character). these are the bindable gestures `write_flick_right` / `write_flick_left`.
+  the left hand still switches spaces.
+- **enter**: draw a stroke down, then left (a return arrow).
+- pointing, pinch and flicks work as before whenever no text field is focused. a pinch right after writing is not a click.
+- the switch `air writing` in the window (or `write.enabled`) turns all of it off. the `toggle_write` action can be bound.
+
+letter shapes (lowercase a-z): one stroke each, in the usual direction, except f k t x y (a second stroke, or
+retrace the line instead of lifting). `i` is a bare line, `l` is a tall line with a foot (or a cursive loop). a bare
+line cannot be told from `l` after scaling, so that is the convention. the shapes are in `letters.py`. the
+recogniser is a template matcher (`recognizer.py`); on synthetic noisy letters it reads 99.8% / 97.5% / 91% right at
+noise 0.6 / 1.0 / 1.4, but your own handwriting in the air will be worse: expect 80-90% at first. the canvas shows what
+was read; flick left to undo.
+
+needs accessibility (to read which field is focused). `python3 tools/ax_probe.py` prints what the focused element
+reports; `python3 tools/write_replay.py <recording.jsonl>` runs a recording (window `record` button) through the
+engine and prints the letters. keys under `write` in your settings file: `still`, `pause`, `arm_delay`, `idle_hide`
+(12 s without ink hides the canvas), `reject` (how sloppy a letter may be), `trigger` (`focus` shows it on any text
+focus instead of a click).
 
 ## tuning
 
